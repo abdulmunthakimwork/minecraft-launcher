@@ -64,6 +64,8 @@ The **Verified Windows release** workflow can build the current Windows shell fr
 
 Open the repository's Actions tab, select the workflow, and run it on the intended source commit with the stable version in `app/package.json`. Leave **publish** disabled to build and inspect the installer and small verification report artifacts. Enable **publish** to upload all five verified release files into that version's draft and publish it after GitHub's recorded sizes and SHA-256 digests match. Existing published releases and version tags are never replaced.
 
+The optional **source_commit** input selects an exact release source SHA while the workflow uses its current publishing code. Leave it empty for a new release from the workflow commit. When rebuilding an existing version tag, supply that tag's source commit; the workflow verifies both checkouts and records their commits separately. The version tag and draft target always bind to the release source, and an existing tag is never moved.
+
 The report verifies both installer containers against all 2,161 packaged resources, the frozen host, 83 sanitized PNGs, neutral first-run seeds, source runtime hashes, and dependency notices. This workflow reuses the existing frozen host; host or resource changes need a separately reviewed new public seed and matching verification baselines.
 
 ## Verification

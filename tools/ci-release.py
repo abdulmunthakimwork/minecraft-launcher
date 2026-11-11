@@ -163,10 +163,28 @@ def tree_sha(values):
     return hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def require_clean_checkout(root):
+def require_clean_checkout(root, label="Checkout"):
     result = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "."], cwd=root,
                             capture_output=True, text=True)
-    require(result.returncode == 0, "Tracked checkout or index differs from the workflow commit")
+    require(result.returncode == 0, label + " tracked files or index differ from its commit")
+
+
+def require_checkout_commit(root, expected, label):
+    require(re.fullmatch(r"[0-9a-f]{40}", expected), label + " requires a full commit SHA")
+    commit = run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+    require(commit == expected, label + " HEAD differs from its expected commit")
+    require_clean_checkout(root, label)
+
+
+def release_provenance(source=None, workflow=None):
+    return {"sourceCommit": source if source is not None else os.environ.get("RELEASE_SOURCE_SHA", "local-dry-run"),
+            "workflowCommit": workflow if workflow is not None else os.environ.get("GITHUB_SHA", "local-dry-run")}
+
+
+def require_report_provenance(report, version, source, workflow):
+    require(report["passed"] and report["version"] == version and report["sourceCommit"] == source
+            and report["workflowCommit"] == workflow,
+            "Verified CI report differs from the release source or workflow commit")
 
 
 def run(args, **kwargs):
@@ -297,10 +315,9 @@ def preflight(args):
     require(lock["packages"]["node_modules/electron-updater"]["version"] == "6.8.11", "Unexpected updater version")
     require(args.seven.is_file(), "Windows 7-Zip is missing")
     require(args.asar.is_dir(), "Locked @electron/asar dependency is missing")
-    if os.environ.get("GITHUB_SHA"):
-        commit = run(["git", "rev-parse", "HEAD"], cwd=args.root, capture_output=True, text=True).stdout.strip()
-        require(commit == os.environ["GITHUB_SHA"], "Checkout differs from workflow commit")
-        require_clean_checkout(args.root)
+    if os.environ.get("GITHUB_SHA") or os.environ.get("RELEASE_SOURCE_SHA"):
+        require_checkout_commit(args.controller_root, os.environ.get("GITHUB_SHA", ""), "Workflow controller")
+        require_checkout_commit(args.root, os.environ.get("RELEASE_SOURCE_SHA", ""), "Release source")
 
 
 def prepare(args):
@@ -401,7 +418,7 @@ def verify(args):
     require(manifest["version"] == args.version and manifest["installer"]["filename"] == names[0]
             and manifest["installer"]["sha512"] == base64.b64encode(digest.digest()).decode(),
             "Installer SHA512 metadata mismatch")
-    report = {"passed": True, "version": args.version, "sourceCommit": os.environ.get("GITHUB_SHA", "local-dry-run"),
+    report = {"passed": True, "version": args.version, **release_provenance(),
               "repository": REPOSITORY, "seedInstallerSha256": SEED_SHA256,
               "frozenHostSha256": HOST_SHA256, "runtimeSha256": runtime,
               "resourceCount": len(actual), "resourceTreeSha256": tree_sha(actual),
@@ -440,8 +457,8 @@ def require_task_draft(release, tag, names):
 
 
 def find_task_release(prefix, tag, request=api):
-    # A draft with no Git tag is invisible to GET /releases/tags/{tag}.
-    # Authenticated release listing includes those drafts. Search all bounded
+    # Drafts can be invisible to GET /releases/tags/{tag}; authenticated release
+    # listing includes them. Search all bounded
     # pages before allowing creation, and refuse ambiguous exact-tag matches.
     matches = []
     for page in range(1, 21):
@@ -454,28 +471,29 @@ def find_task_release(prefix, tag, request=api):
     raise RuntimeError("Release listing exceeded the safety bound; creation is disabled")
 
 
-def require_source_tag(prefix, tag, commit):
-    ref = api(prefix + "/git/ref/tags/" + tag)
+def require_source_tag(prefix, tag, commit, request=api):
+    ref = request(prefix + "/git/ref/tags/" + tag)
     if ref is None:
-        api(prefix + "/git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": commit})
-        ref = api(prefix + "/git/ref/tags/" + tag)
+        request(prefix + "/git/refs", "POST", {"ref": "refs/tags/" + tag, "sha": commit})
+        ref = request(prefix + "/git/ref/tags/" + tag)
     obj = ref["object"]
     for _ in range(4):
         if obj["type"] != "tag":
             break
-        obj = api(prefix + "/git/tags/" + obj["sha"])["object"]
-    require(obj["type"] == "commit" and obj["sha"] == commit, "Version tag differs from workflow commit")
+        obj = request(prefix + "/git/tags/" + obj["sha"])["object"]
+    require(obj["type"] == "commit" and obj["sha"] == commit, "Version tag differs from the release source commit")
 
 
 def publish(args):
     preflight(args)
-    commit = os.environ.get("GITHUB_SHA", "")
-    require(re.fullmatch(r"[0-9a-f]{40}", commit), "Publication requires a GitHub Actions commit")
+    commit = os.environ.get("RELEASE_SOURCE_SHA", "")
+    workflow_commit = os.environ.get("GITHUB_SHA", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", commit), "Publication requires the release source commit")
+    require(re.fullmatch(r"[0-9a-f]{40}", workflow_commit), "Publication requires the workflow commit")
     require(os.environ.get("GITHUB_ACTIONS") == "true", "Publication is restricted to the Actions runner")
     release_dir = args.work / "release"
     report = read_json(release_dir / "ci-release-report.json")
-    require(report["passed"] and report["sourceCommit"] == commit and report["version"] == args.version,
-            "Verified CI report does not match this workflow commit")
+    require_report_provenance(report, args.version, commit, workflow_commit)
     names = asset_names(args.version)
     require(set(report["assets"]) == set(names), "Verified asset list is incomplete")
     for name in names:
@@ -520,7 +538,7 @@ def publish(args):
     require_source_tag(prefix, tag, commit)
     final = api(prefix + "/releases/" + str(rid), "PATCH", {"draft": False, "make_latest": "true"})
     require(not final["draft"] and final["tag_name"] == tag, "Publication response mismatch")
-    print(json.dumps({"published": final["html_url"], "sourceCommit": commit, "remoteSha256Verified": True}))
+    print(json.dumps({"published": final["html_url"], **release_provenance(), "remoteSha256Verified": True}))
 
 
 def self_test(args):
@@ -583,6 +601,47 @@ def self_test(args):
         run(["git", "-c", "user.name=CI release guard", "-c", "user.email=ci-release@example.invalid",
              "commit", "--quiet", "-m", "Guard fixture"], cwd=checkout, capture_output=True)
         require_clean_checkout(checkout)
+        controller_commit = run(["git", "rev-parse", "HEAD"], cwd=checkout,
+                                capture_output=True, text=True).stdout.strip()
+        source = checkout / ".release-source"
+        run(["git", "init", "--quiet", source], capture_output=True)
+        source_file = source / "runtime.js"
+        source_file.write_text("release source\n", encoding="utf-8")
+        run(["git", "add", "runtime.js"], cwd=source, capture_output=True)
+        run(["git", "-c", "user.name=CI release guard", "-c", "user.email=ci-release@example.invalid",
+             "commit", "--quiet", "-m", "Release source fixture"], cwd=source, capture_output=True)
+        source_commit = run(["git", "rev-parse", "HEAD"], cwd=source,
+                            capture_output=True, text=True).stdout.strip()
+        require(source_commit != controller_commit, "Fixture source and workflow commits must differ")
+        require_checkout_commit(checkout, controller_commit, "Workflow controller")
+        require_checkout_commit(source, source_commit, "Release source")
+        try:
+            require_checkout_commit(source, controller_commit, "Release source")
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("Wrong release source SHA was accepted")
+        proof = {"passed": True, "version": "3.41.31", **release_provenance(source_commit, controller_commit)}
+        require_report_provenance(proof, "3.41.31", source_commit, controller_commit)
+        for field, value in (("sourceCommit", controller_commit), ("workflowCommit", source_commit)):
+            try:
+                require_report_provenance(dict(proof, **{field: value}), "3.41.31", source_commit, controller_commit)
+            except RuntimeError:
+                continue
+            raise RuntimeError("Source/workflow report substitution was accepted")
+        tag_calls = []
+        def existing_source_tag(path, method="GET", value=None):
+            tag_calls.append(method)
+            require(method == "GET", "Existing release source tag must not be moved")
+            return {"object": {"type": "commit", "sha": source_commit}}
+        require_source_tag("/repos/example/launcher", "v3.41.31", source_commit, existing_source_tag)
+        try:
+            require_source_tag("/repos/example/launcher", "v3.41.31", controller_commit, existing_source_tag)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("Workflow SHA was accepted in place of the release source tag")
+        require(all(method == "GET" for method in tag_calls), "Existing tag was mutated")
         (checkout / ".ci-release").mkdir()
         (checkout / ".ci-release/artifact.json").write_text("{}", encoding="utf-8")
         require_clean_checkout(checkout)
@@ -590,13 +649,27 @@ def self_test(args):
         for staged in (False, True):
             if staged:
                 run(["git", "add", "runtime.js"], cwd=checkout, capture_output=True)
+            require_checkout_commit(source, source_commit, "Release source")
             try:
-                require_clean_checkout(checkout)
+                require_checkout_commit(checkout, controller_commit, "Workflow controller")
             except RuntimeError:
                 continue
             raise RuntimeError("Dirty tracked checkout was accepted")
+        run(["git", "restore", "--source=HEAD", "--staged", "--worktree", "--", "runtime.js"],
+            cwd=checkout, capture_output=True)
+        source_file.write_text("dirty release source\n", encoding="utf-8")
+        for staged in (False, True):
+            if staged:
+                run(["git", "add", "runtime.js"], cwd=source, capture_output=True)
+            require_checkout_commit(checkout, controller_commit, "Workflow controller")
+            try:
+                require_checkout_commit(source, source_commit, "Release source")
+            except RuntimeError:
+                continue
+            raise RuntimeError("Dirty release source checkout was accepted")
     print(json.dumps({"passed": True, "archiveAndPublicationGuards": True, "trackedCheckoutGuard": True,
-                      "untaggedDraftLookup": True, "duplicateDraftsRejected": True, "releaseListingPagination": True}))
+                      "untaggedDraftLookup": True, "duplicateDraftsRejected": True, "releaseListingPagination": True,
+                      "sourceAndWorkflowChecks": True, "sourceTagImmutable": True, "reportProvenanceSeparated": True}))
 
 
 def main():
@@ -610,13 +683,16 @@ def main():
     parser.add_argument("--seven", type=Path, default=Path("C:/Program Files/7-Zip/7z.exe"))
     parser.add_argument("--version", default=os.environ.get("RELEASE_VERSION", ""))
     args = parser.parse_args()
+    args.controller_root = Path(__file__).resolve().parents[1]
     args.root = args.root.resolve()
-    args.work = (args.work or args.root / ".ci-release").resolve()
+    args.work = (args.work or args.controller_root / ".ci-release").resolve()
     args.seed = args.seed.resolve() if args.seed else None
     args.release = args.release.resolve() if args.release else None
     args.asar = (args.asar or args.root / "app/node_modules/@electron/asar").resolve()
     args.seven = args.seven.resolve()
     require(args.work != args.root and not args.root.is_relative_to(args.work), "Invalid staging directory")
+    require(args.work != args.controller_root and not args.controller_root.is_relative_to(args.work),
+            "Invalid controller staging directory")
     {"preflight": preflight, "prepare": prepare, "verify": verify,
      "publish": publish, "self-test": self_test}[args.command](args)
 

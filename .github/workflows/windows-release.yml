@@ -8,6 +8,11 @@ on:
         required: true
         type: string
         default: '3.41.31'
+      source_commit:
+        description: Optional full source SHA; defaults to the workflow commit
+        required: false
+        type: string
+        default: ''
       publish:
         description: Replace only this version's draft assets and publish after verification
         required: true
@@ -31,6 +36,7 @@ jobs:
         shell: pwsh
     env:
       RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_SOURCE_SHA: ${{ inputs.source_commit || github.sha }}
       CI: 'true'
     steps:
       - name: Check out the workflow commit
@@ -38,26 +44,32 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Check out the release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit || github.sha }}
+          path: .release-source
+          persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: app/package-lock.json
+          cache-dependency-path: .release-source/app/package-lock.json
       - name: Install locked build tools
-        run: npm ci --prefix app --no-audit --no-fund
+        run: npm ci --prefix .release-source/app --no-audit --no-fund
       - name: Test the desktop shell and update policy
-        run: npm test --prefix app
+        run: npm test --prefix .release-source/app
       - name: Check release prerequisites
-        run: python tools/ci-release.py preflight
+        run: python tools/ci-release.py preflight --root .release-source --work .ci-release
       - name: Restore pinned public resources without executing the seed installer
-        run: python tools/ci-release.py prepare
+        run: python tools/ci-release.py prepare --root .release-source --work .ci-release
       - name: Build NSIS and portable installers
         run: |
-          & './app/node_modules/.bin/electron-builder.cmd' --projectDir '.ci-release/stage/app' --win --x64 --publish never
+          & './.release-source/app/node_modules/.bin/electron-builder.cmd' --projectDir '.ci-release/stage/app' --win --x64 --publish never
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify both payloads and generate update metadata
-        run: python tools/ci-release.py verify
+        run: python tools/ci-release.py verify --root .release-source --work .ci-release
       - name: Upload the small verification report
         uses: actions/upload-artifact@v4
         with:
@@ -89,4 +101,4 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           GH_HOST: github.com
-        run: python tools/ci-release.py publish
+        run: python tools/ci-release.py publish --root .release-source --work .ci-release
