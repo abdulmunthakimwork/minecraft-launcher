@@ -1,0 +1,92 @@
+name: Verified Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version matching app/package.json
+        required: true
+        type: string
+        default: '3.41.31'
+      publish:
+        description: Replace only this version's draft assets and publish after verification
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: github.repository == 'abdulmunthakimwork/minecraft-launcher'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      CI: 'true'
+    steps:
+      - name: Check out the workflow commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install locked build tools
+        run: npm ci --prefix app --no-audit --no-fund
+      - name: Test the desktop shell and update policy
+        run: npm test --prefix app
+      - name: Check release prerequisites
+        run: python tools/ci-release.py preflight
+      - name: Restore pinned public resources without executing the seed installer
+        run: python tools/ci-release.py prepare
+      - name: Build NSIS and portable installers
+        run: |
+          & './app/node_modules/.bin/electron-builder.cmd' --projectDir '.ci-release/stage/app' --win --x64 --publish never
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify both payloads and generate update metadata
+        run: python tools/ci-release.py verify
+      - name: Upload the small verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-report-${{ inputs.version }}-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            .ci-release/release/ci-release-report.json
+            .ci-release/release/SHA256SUMS.txt
+            .ci-release/release/Minecraft-Launcher-${{ inputs.version }}-release.json
+            .ci-release/release/latest.yml
+      - name: Upload verified payloads and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ inputs.version }}-${{ github.sha }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+          path: |
+            .ci-release/release/Minecraft-Launcher-Setup-${{ inputs.version }}.exe
+            .ci-release/release/Minecraft-Launcher-${{ inputs.version }}-Portable.exe
+            .ci-release/release/Minecraft-Launcher-${{ inputs.version }}-release.json
+            .ci-release/release/latest.yml
+            .ci-release/release/SHA256SUMS.txt
+            .ci-release/release/ci-release-report.json
+      - name: Publish the complete verified draft
+        if: inputs.publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: python tools/ci-release.py publish
