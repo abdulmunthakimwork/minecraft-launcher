@@ -431,10 +431,27 @@ def api(path, method="GET", value=None):
 
 
 def require_task_draft(release, tag, names):
+    state = {"id": release.get("id"), "tag_name": str(release.get("tag_name", ""))[:64],
+             "draft": release.get("draft"), "prerelease": release.get("prerelease")}
     require(release["tag_name"] == tag and release["draft"] and not release["prerelease"],
-            "Only this version's unpublished stable draft may be changed")
+            "Only this version's unpublished stable draft may be changed: " + json.dumps(state))
     require(all(asset["name"] in names for asset in release["assets"]), "Unexpected draft assets; inspect manually")
     require(len({a["name"] for a in release["assets"]}) == len(release["assets"]), "Duplicate draft assets")
+
+
+def find_task_release(prefix, tag, request=api):
+    # A draft with no Git tag is invisible to GET /releases/tags/{tag}.
+    # Authenticated release listing includes those drafts. Search all bounded
+    # pages before allowing creation, and refuse ambiguous exact-tag matches.
+    matches = []
+    for page in range(1, 21):
+        releases = request(prefix + f"/releases?per_page=100&page={page}")
+        require(isinstance(releases, list), "Release listing was unavailable")
+        matches.extend(release for release in releases if release.get("tag_name") == tag)
+        require(len(matches) <= 1, "Multiple releases have the requested tag; inspect manually")
+        if len(releases) < 100:
+            return matches[0] if matches else None
+    raise RuntimeError("Release listing exceeded the safety bound; creation is disabled")
 
 
 def require_source_tag(prefix, tag, commit):
@@ -469,7 +486,7 @@ def publish(args):
     repo = api(prefix)
     require(repo["id"] == REPOSITORY_ID and repo["full_name"] == REPOSITORY, "Repository identity mismatch")
     tag = "v" + args.version
-    release = api(prefix + "/releases/tags/" + tag)
+    release = find_task_release(prefix, tag)
     if release is None:
         release = api(prefix + "/releases", "POST", {"tag_name": tag, "target_commitish": commit,
                       "name": "Minecraft Launcher " + args.version, "draft": True, "prerelease": False,
@@ -530,6 +547,33 @@ def self_test(args):
         except RuntimeError:
             continue
         raise RuntimeError("Unsafe draft state was accepted")
+    calls = []
+    untagged_draft = dict(draft, id=441772528)
+    def draft_listing(path, method="GET", value=None):
+        calls.append((path, method))
+        require(method == "GET", "Draft discovery attempted a mutation")
+        if "/releases/tags/" in path:
+            return None  # Real API behavior for an existing untagged draft.
+        return [untagged_draft]
+    require(draft_listing("/repos/example/launcher/releases/tags/v3.41.31") is None,
+            "Untagged draft fixture did not reproduce the tag lookup miss")
+    require(find_task_release("/repos/example/launcher", "v3.41.31", draft_listing) == untagged_draft,
+            "Existing untagged draft was not selected")
+    require(all(method == "GET" for _, method in calls), "Draft discovery attempted creation")
+    def duplicate_listing(path):
+        return [untagged_draft, dict(untagged_draft, id=441772529)]
+    try:
+        find_task_release("/repos/example/launcher", "v3.41.31", duplicate_listing)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("Duplicate exact-tag releases were accepted")
+    def paginated_listing(path):
+        if path.endswith("page=1"):
+            return [{"tag_name": "v0.0." + str(n)} for n in range(100)]
+        return [untagged_draft]
+    require(find_task_release("/repos/example/launcher", "v3.41.31", paginated_listing) == untagged_draft,
+            "Existing draft on the second page was missed")
     with tempfile.TemporaryDirectory(prefix="ci-release-guard-") as temporary:
         checkout = Path(temporary)
         run(["git", "init", "--quiet", checkout], capture_output=True)
@@ -551,7 +595,8 @@ def self_test(args):
             except RuntimeError:
                 continue
             raise RuntimeError("Dirty tracked checkout was accepted")
-    print(json.dumps({"passed": True, "archiveAndPublicationGuards": True, "trackedCheckoutGuard": True}))
+    print(json.dumps({"passed": True, "archiveAndPublicationGuards": True, "trackedCheckoutGuard": True,
+                      "untaggedDraftLookup": True, "duplicateDraftsRejected": True, "releaseListingPagination": True}))
 
 
 def main():
