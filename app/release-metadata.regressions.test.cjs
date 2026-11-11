@@ -1,0 +1,31 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+test('release metadata binds version and both hashes to the actual relative installer', async t => {
+  const source = path.join(__dirname, 'release-metadata.js');
+  assert.ok(fs.existsSync(source), 'Release metadata generation is missing');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-release-test-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const bytes = Buffer.from('synthetic release payload');
+  const name = 'Minecraft-Launcher-Setup-3.41.30.exe';
+  fs.writeFileSync(path.join(dir, name), bytes);
+  const {createReleaseMetadata} = require(source);
+  await createReleaseMetadata(dir, '3.41.30');
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'Minecraft-Launcher-3.41.30-release.json')));
+  assert.equal(manifest.appId, 'app.mclauncher.desktop');
+  assert.equal(manifest.version, '3.41.30');
+  assert.equal(manifest.installer.filename, name);
+  assert.equal(manifest.installer.size, 25);
+  assert.equal(manifest.installer.sha256, crypto.createHash('sha256').update(bytes).digest('hex'));
+  const yaml = require('js-yaml').load(fs.readFileSync(path.join(dir, 'latest.yml'), 'utf8'));
+  assert.equal(yaml.version, '3.41.30');
+  assert.equal(yaml.files[0].url, name);
+  assert.equal(yaml.files[0].size, 25);
+  assert.equal(yaml.files[0].sha512, crypto.createHash('sha512').update(bytes).digest('base64'));
+  await assert.rejects(createReleaseMetadata(dir, '3.41.31'), /ENOENT/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'Minecraft-Launcher-3.41.30-release.json'))).version, '3.41.30');
+});

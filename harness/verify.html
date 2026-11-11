@@ -1,0 +1,282 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>offline route check</title>
+<style>
+  body { font: 13px/1.4 monospace; background: #16181c; color: #d8dde6; margin: 16px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #2a2f38; white-space: nowrap; }
+  th { color: #8b95a5; font-weight: 600; }
+  .fail { color: #ff6b6b; font-weight: 700; }
+  .problem { color: #ff6b6b; }
+  .ok { color: #6ee7a8; }
+  td.err { color: #ffb86b; font-size: 11px; max-width: 520px; overflow: hidden; text-overflow: ellipsis; }
+  iframe { position: fixed; left: -3000px; top: 0; width: 1280px; height: 900px; border: 0; }
+  #status { margin: 8px 0; color: #8b95a5; }
+</style>
+</head>
+<body>
+<h1>offline route check</h1>
+<div id="status">starting…</div>
+<div id="out"></div>
+<script>
+// Loads every launcher route in a hidden frame, then reports what rendered and
+// whether the frame tried to reach the network. Run it against the harness:
+//   http://127.0.0.1:8790/__verify.html
+//
+// Every route the UI can reach is listed: the What's New feed, the home page,
+// all five Java tabs, all seven Bedrock tabs, and the settings sections. The
+// tabs other than the first are only reachable through the app's own
+// navigation, so they are the ones most likely to break when the host shim
+// changes. A second pass follows every same-origin link the shell renders, so a
+// page that is added to the app but not to this list is still covered.
+// A page can render its shell and still be missing the content it exists for
+// (an empty settings body, a skins page with no 3D view). These anchors are the
+// per-route smoke test: the words and elements the real page always has.
+const REQUIRED = {
+  "/settings/general": ["LAUNCHER SETTINGS", "MINECRAFT: JAVA EDITION SETTINGS", "QUICK PLAY"],
+  "/settings/about": ["Third-party licenses"],
+  "/settings/accounts": ["Add Microsoft account"],
+  "/games/java/skins": ["Current", "Library"],
+  "/games/java/play": ["PLAY"],
+  "/games/java/patch_notes": ["VERSIONS"],
+  "/games/bedrock/faq": ["Frequently asked questions"],
+};
+// Failure notices that are not "Whoops" but are still the page telling the
+// user something broke. The launcher upgrade banner is the classic one.
+const TOAST = /Unable to determine new Launcher install status|Unable to save your changes|Unable to load|Please try again/i;
+
+const ROUTES = [
+  // "/" is the home page; the HOME tab's href is /home/general, and the app
+  // treats the two as the same page, so that is the tab to confirm selected.
+  { path: "/", expect: "/home/general" },
+  { path: "/home/general", expect: "/home/general" },
+  { path: "/games/java/play", expect: "/games/java/play" },
+  { path: "/games/java/configurations", expect: "/games/java/configurations" },
+  { path: "/games/java/realms", expect: "/games/java/realms" },
+  { path: "/games/java/skins", expect: "/games/java/skins" },
+  { path: "/games/java/patch_notes", expect: "/games/java/patch_notes" },
+  { path: "/games/bedrock/play", expect: "/games/bedrock/play" },
+  { path: "/games/bedrock/realms", expect: "/games/bedrock/realms" },
+  { path: "/games/bedrock/creator_tools", expect: "/games/bedrock/creator_tools" },
+  { path: "/games/bedrock/marketplace_pass", expect: "/games/bedrock/marketplace_pass" },
+  { path: "/games/bedrock/faq", expect: "/games/bedrock/faq" },
+  { path: "/games/bedrock/installation", expect: null },
+  { path: "/games/bedrock/patch_notes", expect: "/games/bedrock/patch_notes" },
+  { path: "/settings/general", expect: "/settings/general" },
+  { path: "/settings/accounts", expect: "/settings/accounts" },
+  { path: "/settings/about", expect: "/settings/about" },
+];
+const HIDDEN_PRODUCTS = /(dungeons|legends)/i;
+// The app's React error boundary paints this panel and swallows the cause. It
+// says "Whoops!" and "An unexpected issue occurred"; the page is still a fully
+// rendered DOM, so a check that only looks for emptiness passes it. Match the
+// panel's own words, and the other in-app dead ends a page can land on.
+const CRASH = /Whoops!|An unexpected issue occurred|PAGE NOT FOUND|Content not found|something went wrong|unexpected error/i;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function load(route) {
+  return new Promise((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.src = route;
+    let done = false;
+    const finish = (why) => {
+      if (done) return;
+      done = true;
+      resolve({ frame, why });
+    };
+    frame.addEventListener("load", () => finish("load"));
+    frame.addEventListener("error", () => finish("error"));
+    document.body.appendChild(frame);
+    setTimeout(() => finish("timeout"), 8000);
+  });
+}
+
+async function inspect(route, expect) {
+  const { frame } = await load(route);
+  // A sub-page reached by clicking (settings sections, product tabs) needs the
+  // shell to mount, the click to land, and the new tab to fetch its content.
+  const deep = route.startsWith("/settings/") || /^\/games\/[a-z0-9]+\/(?!play$)/.test(route);
+  await sleep(deep ? 5000 : 2600);
+  let report = { route, expect, error: null };
+  try {
+    const doc = frame.contentDocument;
+    const win = frame.contentWindow;
+    // The tab a route asks for becomes the selected one only once the click has
+    // been acted on, which in an offscreen frame can lag. Poll for it instead of
+    // sampling once, so slowness cannot read as a wrong page.
+    const selected = (d) => {
+      if (!expect) return true;
+      const a = d.querySelector('a[href="' + expect + '"]');
+      return Boolean(a) && (a.getAttribute("aria-selected") === "true" ||
+        a.getAttribute("aria-current") === "page");
+    };
+    let landed = selected(doc);
+    for (let i = 0; i < 24 && !landed; i++) {
+      await sleep(250);
+      landed = selected(doc);
+    }
+    const text = (doc.body.innerText || "").replace(/\s+/g, " ").trim();
+    const alerts = [...doc.querySelectorAll("[id$=Alert],[id=SecureStoreFailureNotification]")]
+      .filter((el) => el.offsetParent !== null || el.getClientRects().length)
+      .map((el) => el.id);
+    // Spacer <img> elements with no src are normal here (lazy-load slots), so
+    // only count images that actually requested something.
+    const images = [...doc.images].filter((img) => img.getAttribute("src"));
+    const broken = images.filter((img) => img.complete && img.naturalWidth === 0).length;
+    // A stub is the transparent placeholder for an asset the capture did not
+    // keep: it renders, but it is not the real artwork.
+    const stubbed = images.filter((img) => (img.getAttribute("src") || "").startsWith("/__stub/"));
+    const tabs = [...doc.querySelectorAll('[role=tab][aria-selected=true]')]
+      .map((el) => (el.title || el.innerText || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const crash = text.match(CRASH) || text.match(TOAST);
+    const missing = (REQUIRED[route] || []).filter((word) => !text.includes(word));
+    const canvas = doc.querySelectorAll("canvas").length;
+    const errors = (win.__errors || []).map((e) => e.text.replace(/\s+/g, " "));
+    report = {
+      route,
+      chars: text.length,
+      heading: tabs.join(" > ").slice(0, 46),
+      snippet: text.slice(120, 190),
+      alerts,
+      remote: (win.__netlog || []).length,
+      imgs: images.length,
+      broken,
+      stubbed: stubbed.length,
+      stubSample: stubbed.slice(0, 2).map((img) => img.getAttribute("src")),
+      crashed: crash ? text.slice(Math.max(0, crash.index - 20), crash.index + 60) : "",
+      crashWord: crash ? crash[0] : "",
+      missing,
+      canvas,
+      errors: errors.slice(0, 2),
+      blank: text.length < 40,
+      landed,
+    };
+  } catch (e) {
+    report.error = String(e);
+  }
+  frame.remove();
+  return report;
+}
+
+// Follow every same-origin link the shell renders, so pages that are reachable
+// only by clicking (a product tab, a settings section, an inline link) are
+// covered even after the app adds one.
+async function discoverSeeds() {
+  const seeds = new Set();
+  for (const path of ["/", "/games/java/play", "/games/bedrock/play", "/settings/general"]) {
+    const { frame } = await load(path);
+    await sleep(3200);
+    try {
+      const doc = frame.contentDocument;
+      for (const a of doc.querySelectorAll('a[href^="/"]')) {
+        const href = a.getAttribute("href").split("?")[0];
+        if (href && !HIDDEN_PRODUCTS.test(href)) seeds.add(href);
+      }
+    } catch (e) {
+      /* the explicit list still runs */
+    }
+    frame.remove();
+  }
+  return [...seeds];
+}
+
+(async () => {
+  const rows = [];
+  const status = document.getElementById("status");
+  const seen = new Set();
+  let n = 0;
+  const total = ROUTES.length;
+  for (const { path, expect } of ROUTES) {
+    status.textContent = `checking ${++n}/${total}: ${path}`;
+    seen.add(path);
+    rows.push(await inspect(path, expect));
+  }
+
+  // Links the shell rendered that this list did not name.
+  status.textContent = "discovering links…";
+  for (const path of await discoverSeeds()) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    status.textContent = `checking discovered ${path}`;
+    rows.push(await inspect(path, path));
+  }
+
+  // Sidebar scope: the products that are out of scope must not be listed, and a
+  // deep link into one must land back on the launcher root rather than on a
+  // page for a game this build does not ship.
+  status.textContent = "checking sidebar scope…";
+  const { frame } = await load("/");
+  await sleep(2200);
+  let sidebar = [];
+  let listed = [];
+  try {
+    const doc = frame.contentDocument;
+    sidebar = [...doc.querySelectorAll('[id$="-menulink-wrap"]')]
+      .filter((el) => el.getClientRects().length > 0)
+      .map((el) => el.id.replace("-menulink-wrap", ""));
+    listed = sidebar.filter((name) => HIDDEN_PRODUCTS.test(name));
+  } catch (e) {
+    listed = ["sidebar unreadable: " + e];
+  }
+  frame.remove();
+  const sidebarRow = {
+    route: "sidebar",
+    chars: sidebar.length,
+    heading: "visible entries",
+    alerts: listed.map((n) => "listed:" + n),
+    remote: 0,
+    imgs: 0,
+    broken: 0,
+    snippet: sidebar.join(", "),
+  };
+  rows.push(sidebarRow);
+
+  status.textContent = "checking removed-product deep link…";
+  const removed = await inspect("/games/legends/play", null);
+  const redirected = await load("/games/legends/play");
+  await sleep(2500);
+  let finalPath = "";
+  try {
+    finalPath = redirected.frame.contentWindow.location.pathname;
+  } catch (e) {
+    finalPath = "unreadable";
+  }
+  redirected.frame.remove();
+  rows.push({
+    route: "removed-product link",
+    chars: finalPath.length,
+    heading: "lands on",
+    alerts: finalPath === "/" ? [] : ["stayed:" + finalPath],
+    remote: 0,
+    imgs: 0,
+    broken: 0,
+    snippet: finalPath,
+    crashWord: removed.crashWord,
+    errors: removed.errors,
+    crashed: removed.crashed,
+  });
+
+  const bad = (r) => r.error || r.blank || r.remote > 0 || r.stubbed > 0 || r.alerts.length > 0 ||
+    r.crashWord || (r.landed === false) || (r.missing && r.missing.length > 0);
+  const fails = rows.filter(bad).length;
+  status.textContent = fails ? `${fails} of ${rows.length} checks failed` : `all ${rows.length} checks local and rendered`;
+  const esc = (v) => String(v).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  document.getElementById("out").innerHTML =
+    "<table><tr><th>route</th><th>chars</th><th>selected</th><th>landed</th><th>alerts</th><th>remote</th><th>imgs</th><th>broken</th><th>stub</th><th>missing</th><th>content</th><th>first error</th><th>verdict</th></tr>" +
+    rows.map((r) => `<tr><td>${esc(r.route)}</td><td>${r.chars ?? "-"}</td><td>${esc(r.heading ?? "")}</td>` +
+      `<td>${r.landed === false ? "<span class=problem>no</span>" : r.landed === true ? "yes" : "-"}</td>` +
+      `<td>${esc((r.alerts || []).join(","))}</td><td>${r.remote ?? "-"}</td><td>${r.imgs ?? "-"}</td>` +
+      `<td>${r.broken ?? "-"}</td><td>${esc((r.stubSample || []).join(" ") || String(r.stubbed ?? "-"))}</td><td class="${r.missing && r.missing.length ? "problem" : ""}">${esc((r.missing || []).join(", ") || "-")}</td><td>${esc(r.snippet || "")}</td>` +
+      `<td class=err title="${esc((r.errors || []).join(" | "))}">${esc(((r.errors || [])[0] || "").slice(0, 90))}</td>` +
+      `<td class="${bad(r) ? "fail" : "ok"}">${bad(r) ? "FAIL " + esc(r.error || r.crashed || (r.landed === false ? "wrong page" : "")) : "ok"}</td></tr>`).join("") +
+    "</table>";
+  window.__verifyDone = { fails, total: rows.length, rows };
+})();
+</script>
+</body>
+</html>

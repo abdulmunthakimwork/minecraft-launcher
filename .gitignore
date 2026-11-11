@@ -1,0 +1,34 @@
+# Dependencies and generated builds
+node_modules/
+__pycache__/
+*.py[cod]
+/app/build/
+/release*/
+*.log
+*.tmp
+
+# Local UI/content resources are build prerequisites, not source exports.
+/minecraft-launcher-re/
+/harness/content/
+/harness/assets/
+/harness/fonts/
+/harness/versions.json
+
+# Local accounts, configuration, diagnostics and development output
+/harness/state*.json
+/harness/offline_accounts.json
+/harness/msa_tokens.json
+/harness/microsoft-client-id.txt
+/harness/capes/
+/harness/shots/
+/harness/*-report.json
+*privacy-report.json
+/app/smoke.png
+/.cache/
+/.audit/
+/.planning/
+/.impeccable/
+/.env*
+/.dev-game/
+*.pem
+*.key

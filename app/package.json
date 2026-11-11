@@ -1,0 +1,129 @@
+{
+  "name": "minecraft-launcher-desktop",
+  "productName": "Minecraft Launcher",
+  "version": "3.41.30",
+  "private": true,
+  "description": "Desktop shell for the reconstructed Minecraft Launcher UI",
+  "author": "Minecraft Launcher (reconstruction)",
+  "main": "main.js",
+  "scripts": {
+    "start": "node start.js",
+    "audit": "electron ../harness/audit.js",
+    "test": "node --test --test-concurrency=1 *.test.cjs",
+    "release:metadata": "node release-metadata.js",
+    "host": "python -m PyInstaller --noconfirm --clean --onedir --name mc-launcher-host --distpath build/host --workpath build/pyinstaller --specpath build --paths ../harness --hidden-import tkinter --hidden-import tkinter.filedialog ../harness/server.py",
+    "dist": "npm run host && electron-builder --win --x64",
+    "dist:dir": "npm run host && electron-builder --win --x64 --dir"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "app.mclauncher.desktop",
+    "productName": "Minecraft Launcher",
+    "copyright": "Reconstruction of the Minecraft Launcher UI",
+    "directories": {
+      "output": "../release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "lifecycle.js",
+      "updater.js",
+      "preload.js",
+      "start.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "updater-cache.yml",
+        "to": "app-update.yml"
+      },
+      {
+        "from": "build/host/mc-launcher-host",
+        "to": "host"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "../build-seeds/harness/state.json",
+        "to": "root/harness/state.json"
+      },
+      {
+        "from": "../harness",
+        "to": "root/harness",
+        "filter": [
+          "bridge.js",
+          "ui.js",
+          "installation_ui.js",
+          "versions.json",
+          "content/**/*",
+          "fonts/**/*",
+          "assets/media/**/*",
+          "assets/mojang_cape.png",
+          "assets/skins/alex.png",
+          "assets/skins/alex_avatar.png",
+          "assets/skins/steve.png",
+          "assets/skins/steve_avatar.png"
+        ]
+      },
+      {
+        "from": "../minecraft-launcher-re/src/ui",
+        "to": "root/minecraft-launcher-re/src/ui",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../build-seeds/default-state",
+        "to": "root/default-state",
+        "filter": [
+          "launcher_profiles.json",
+          "launcher_settings.json",
+          "launcher_product_state_microsoft_store.json",
+          "launcher_ui_state_microsoft_store.json",
+          "treatment_tags.json",
+          "versions/version_manifest_v2.json",
+          "versions/jre_manifest.json"
+        ]
+      }
+    ],
+    "asar": true,
+    "compression": "normal",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Minecraft Launcher",
+      "artifactName": "Minecraft-Launcher-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Minecraft-Launcher-${version}-Portable.${ext}"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  }
+}
