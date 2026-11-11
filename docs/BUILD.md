@@ -66,6 +66,8 @@ Open the repository's Actions tab, select the workflow, and run it on the intend
 
 The optional **source_commit** input selects an exact release source SHA while the workflow uses its current publishing code. Leave it empty for a new release from the workflow commit. When rebuilding an existing version tag, supply that tag's source commit; the workflow verifies both checkouts and records their commits separately. The version tag and draft target always bind to the release source, and an existing tag is never moved.
 
+GitHub can allow the runner to upload all verified assets while rejecting the final publish request with `403 Resource not accessible by integration`. In that case the complete verified draft remains available. A repository owner can publish it from Releases using their existing authorized account; check the five asset digests and source tag first. The 3.41.31 release used this owner publication step. The launcher's public update checks and downloads do not require GitHub credentials.
+
 The report verifies both installer containers against all 2,161 packaged resources, the frozen host, 83 sanitized PNGs, neutral first-run seeds, source runtime hashes, and dependency notices. This workflow reuses the existing frozen host; host or resource changes need a separately reviewed new public seed and matching verification baselines.
 
 ## Verification
