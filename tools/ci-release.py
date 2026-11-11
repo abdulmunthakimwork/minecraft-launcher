@@ -429,6 +429,30 @@ def verify(args):
     print(json.dumps({"passed": True, "resourcesMatchedInEachPayload": len(actual), "assets": assets}))
 
 
+def github_error_reason(data):
+    # Emit only recognized, fixed messages. Never echo an API body, URL, or
+    # credential that a remote error could include in its message field.
+    try:
+        message = json.loads(data).get("message", "")
+    except (ValueError, AttributeError, UnicodeError):
+        return "GitHub rejected the request"
+    if not isinstance(message, str):
+        return "GitHub rejected the request"
+    known = (("resource not accessible by integration", "Resource not accessible by integration"),
+             ("resource not accessible by personal access token", "Personal access token lacks access"),
+             ("must have push access", "Repository push access is required"),
+             ("requires authentication", "Authentication is required"),
+             ("bad credentials", "Bad credentials"),
+             ("rate limit exceeded", "GitHub rate limit exceeded"),
+             ("validation failed", "Validation failed"),
+             ("release is immutable", "Release is immutable"),
+             ("not found", "Not found"))
+    for fragment, safe in known:
+        if fragment in message.lower():
+            return safe
+    return "GitHub rejected the request"
+
+
 def api(path, method="GET", value=None):
     token = os.environ.get("GITHUB_TOKEN", "")
     require(bool(token), "Ephemeral GITHUB_TOKEN is required for publication")
@@ -444,7 +468,8 @@ def api(path, method="GET", value=None):
     except urllib.error.HTTPError as error:
         if error.code == 404 and method == "GET":
             return None
-        raise RuntimeError(f"GitHub API {method} failed with HTTP {error.code}") from None
+        reason = github_error_reason(error.read(8192))
+        raise RuntimeError(f"GitHub API {method} failed with HTTP {error.code}: {reason}") from None
 
 
 def require_task_draft(release, tag, names):
@@ -454,6 +479,25 @@ def require_task_draft(release, tag, names):
             "Only this version's unpublished stable draft may be changed: " + json.dumps(state))
     require(all(asset["name"] in names for asset in release["assets"]), "Unexpected draft assets; inspect manually")
     require(len({a["name"] for a in release["assets"]}) == len(release["assets"]), "Duplicate draft assets")
+
+
+def release_identity_payload(release, tag, commit, final=False):
+    require(release["tag_name"] == tag and release["draft"] and not release["prerelease"],
+            "Only the expected stable draft can receive an identity update")
+    require(re.fullmatch(r"[0-9a-f]{40}", commit), "Release identity requires the full source SHA")
+    require(isinstance(release.get("name"), (str, type(None)))
+            and isinstance(release.get("body"), (str, type(None))), "Invalid release name/body types")
+    payload = {"tag_name": tag, "target_commitish": commit, "draft": not final, "prerelease": False,
+               "name": release.get("name"), "body": release.get("body")}
+    if final:
+        payload["make_latest"] = "true"
+    return payload
+
+
+def require_release_identity(release, payload):
+    fields = ("tag_name", "target_commitish", "draft", "prerelease", "name", "body")
+    require(all(release.get(field) == payload[field] for field in fields),
+            "GitHub release identity differs from the complete update payload")
 
 
 def find_task_release(prefix, tag, request=api):
@@ -513,8 +557,15 @@ def publish(args):
     require_task_draft(release, tag, names)
     require_source_tag(prefix, tag, commit)
     rid = release["id"]
-    release = api(prefix + "/releases/" + str(rid), "PATCH", {"target_commitish": commit})
+    release_path = prefix + "/releases/" + str(rid)
+    release = api(release_path)
     require_task_draft(release, tag, names)
+    if release["target_commitish"] != commit:
+        payload = release_identity_payload(release, tag, commit)
+        api(release_path, "PATCH", payload)
+        release = api(release_path)
+        require_release_identity(release, payload)
+        require_task_draft(release, tag, names)
     existing = {a["name"]: a for a in release["assets"]}
     for name in names:
         expected = report["assets"][name]
@@ -536,8 +587,10 @@ def publish(args):
         require(asset["state"] == "uploaded" and asset["size"] == expected["size"] and
                 asset.get("digest") == "sha256:" + expected["sha256"], "GitHub asset digest mismatch")
     require_source_tag(prefix, tag, commit)
-    final = api(prefix + "/releases/" + str(rid), "PATCH", {"draft": False, "make_latest": "true"})
-    require(not final["draft"] and final["tag_name"] == tag, "Publication response mismatch")
+    payload = release_identity_payload(remote, tag, commit, final=True)
+    api(release_path, "PATCH", payload)
+    final = api(release_path)
+    require_release_identity(final, payload)
     print(json.dumps({"published": final["html_url"], **release_provenance(), "remoteSha256Verified": True}))
 
 
@@ -558,6 +611,46 @@ def self_test(args):
     names = asset_names("3.41.31")
     draft = {"tag_name": "v3.41.31", "draft": True, "prerelease": False, "assets": []}
     require_task_draft(draft, "v3.41.31", names)
+    identity_commit = "a" * 40
+    identity_fixture = dict(draft, id=441772528, target_commitish="b" * 40,
+                            name="Minecraft Launcher 3.41.31", body="Reviewed release notes\nSecond line.")
+    def identity_api(state, payload):
+        result = dict(state, **{key: value for key, value in payload.items() if key != "make_latest"})
+        if "tag_name" not in payload:
+            result["tag_name"] = "untagged-fixture"
+        return result
+    sparse = identity_api(identity_fixture, {"target_commitish": identity_commit})
+    require(sparse["tag_name"] != identity_fixture["tag_name"], "Sparse PATCH fixture did not reproduce tag loss")
+    full = release_identity_payload(identity_fixture, "v3.41.31", identity_commit)
+    require("make_latest" not in full, "Draft alignment must not change latest release")
+    aligned = identity_api(identity_fixture, full)
+    require_release_identity(aligned, full)
+    require_task_draft(aligned, "v3.41.31", names)
+    require(aligned["name"] == identity_fixture["name"] and aligned["body"] == identity_fixture["body"],
+            "Draft alignment lost release name/body")
+    publication = release_identity_payload(aligned, "v3.41.31", identity_commit, final=True)
+    require(publication["make_latest"] == "true" and publication["draft"] is False,
+            "Final publication payload is incomplete")
+    published = identity_api(aligned, publication)
+    require_release_identity(published, publication)
+    require(published["tag_name"] == "v3.41.31" and published["target_commitish"] == identity_commit
+            and published["name"] == identity_fixture["name"] and published["body"] == identity_fixture["body"],
+            "Final publication lost release identity")
+    dirty_identity = dict(published, tag_name="untagged-fixture")
+    try:
+        require_release_identity(dirty_identity, publication)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("Incorrect publication readback was accepted")
+    credential_fixture = "ghs_" + "z" * 36
+    hostile_error = json.dumps({"message": "Resource not accessible by integration " + credential_fixture
+                               + " https://example.invalid/private", "other": credential_fixture}).encode()
+    safe_error = github_error_reason(hostile_error)
+    require(safe_error == "Resource not accessible by integration" and len(safe_error) <= 80,
+            "Permission diagnostic is not bounded and sanitized")
+    require(github_error_reason(json.dumps({"message": credential_fixture}).encode())
+            == "GitHub rejected the request", "Unknown error exposed an API body")
     for field, value in (("draft", False), ("tag_name", "v3.41.30"), ("prerelease", True),
                          ("assets", [{"name": "unrelated.exe"}])):
         try:
@@ -669,7 +762,8 @@ def self_test(args):
             raise RuntimeError("Dirty release source checkout was accepted")
     print(json.dumps({"passed": True, "archiveAndPublicationGuards": True, "trackedCheckoutGuard": True,
                       "untaggedDraftLookup": True, "duplicateDraftsRejected": True, "releaseListingPagination": True,
-                      "sourceAndWorkflowChecks": True, "sourceTagImmutable": True, "reportProvenanceSeparated": True}))
+                      "sourceAndWorkflowChecks": True, "sourceTagImmutable": True, "reportProvenanceSeparated": True,
+                      "fullReleaseIdentityUpdates": True, "apiErrorsSanitized": True}))
 
 
 def main():
