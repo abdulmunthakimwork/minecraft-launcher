@@ -1,15 +1,11 @@
 # Launcher updates
 
-No update service address is bundled. Settings → Launcher updates shows setup until an HTTPS release directory is supplied. GitHub Releases currently provides manual setup/portable downloads; its cross-origin asset redirects do not meet this version's generic-feed policy, so do not paste a GitHub Releases URL into the automatic feed field.
+Version 3.41.31 defaults to the public GitHub Releases in `abdulmunthakimwork/minecraft-launcher`. The desktop app checks on startup and every six hours, downloads a newer stable setup automatically, and verifies its filename, byte size and SHA-512. Settings shows when the update is ready. Use **Restart and install** when no game, download or installation is active; closing the window never installs an update.
 
-Build the release first, then generate metadata from the actual output:
+Settings → Launcher updates shows the current source and last successful check. **Use GitHub** restores the default repository. An explicitly saved empty source disables automatic checks, and saved custom HTTPS directories remain supported. Browser views cannot configure or install desktop updates. Existing 3.41.30 users need to install 3.41.31 once to gain the GitHub provider.
 
-```powershell
-node app/release-metadata.js "C:\path\to\release"
-```
+Publish the complete Windows NSIS setup and prepared `latest.yml` in a stable `vX.Y.Z` GitHub release. Generate metadata from the actual installer with `node app/release-metadata.js <release-directory> <version>`. The versioned release JSON also records app identity, SHA-256 and SHA-512. Upload every asset into a draft and verify its hashes before publishing; never move an existing tag. Portable executables and blockmaps are not used for automatic updates.
 
-The command writes `latest.yml` with exact installer byte size and SHA-512, plus `Minecraft-Launcher-<version>-release.json` with app identity, size, SHA-256 and SHA-512. Host those metadata files and the full NSIS setup in one HTTPS directory. Upload the setup and versioned manifest before replacing `latest.yml`; avoid long caching for `latest.yml`. Portable executables and blockmaps are not used for automatic updates.
+The public GitHub provider uses release web endpoints without a login/token. Its transport is restricted to this repository's release discovery, stable setup/metadata URLs and the pinned repository ID in GitHub's release CDN. Foreign repositories, insecure redirects, credentialed URLs, path escapes, prereleases and unrelated installers are rejected. Metadata tag/version must agree. Generated metadata deliberately contains no `tag` field; the pinned upstream provider can otherwise let a manually authored field override its discovered tag, while downloads still remain version-bound to this repository.
 
-The generic feed requires a credential-free HTTPS directory URL. It rejects HTTPS downgrades, redirects to another origin, directory escapes, unrelated app installers and prerelease versions. The staged setup is rechecked before Restart and install. Installation remains unavailable during active game/download/commit work, and closing the app never automatically installs an update.
-
-Publishing metadata does not configure clients or validate a hosted service. A future GitHub updater provider needs an explicit implementation and verification of its redirect/asset rules.
+A custom feed must be a credential-free HTTPS directory containing the full setup and generated metadata. Its redirects stay within that origin/directory. Host the setup and versioned manifest before replacing `latest.yml`, and avoid long caching for metadata. Both source kinds reverify the staged installer immediately before safe restart admission and execution.

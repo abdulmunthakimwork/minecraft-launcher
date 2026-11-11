@@ -38,10 +38,10 @@ if(!process.versions.electron){
   const active=(extra={})=>({job:'import',jobId:'import-owned',phase:'downloading',controlStatus:'running',message:'Downloading fixture',done:1,total:3,canPause:true,canResume:false,canCancel:true,...extra});
   async function importJob(){await fixture();await run(`__fiveUI.openModpackDialog();document.querySelector('#__hx-modpack-search').value='keep this query';document.querySelector('[data-hx-local-pack-import]').click();`);
     await run(`__job=${JSON.stringify(active())}`);await respond('/__modpacks/import-file',{ok:true,started:true,jobId:'import-owned'});await pause(30);}
-  async function updater(){await fixture(`<main><h1>Settings</h1><section><div><input type="checkbox" id="keepLauncherOpen"><label for="keepLauncherOpen">Keep launcher open</label></div></section></main>`);
-    await run(`window.__updates={status:'setup',currentVersion:'3.41.30',feedUrl:'',availableVersion:null,progress:null,error:null,installAllowed:false};window.__updateCalls=[];window.__updateListeners=[];
-      window.launcherDesktop=Object.freeze({getAppInfo:async()=>({version:'3.41.30',packaged:true}),getUpdateState:async()=>({...__updates}),
-        configureUpdateFeed:async url=>{__updateCalls.push(['configure',url]);return {...__updates,feedUrl:url,status:url?'idle':'setup'};},
+  async function updater(initial={}){await fixture(`<main><h1>Settings</h1><section><div><input type="checkbox" id="keepLauncherOpen"><label for="keepLauncherOpen">Keep launcher open</label></div></section></main>`);
+    await run(`window.__updates={status:'setup',currentVersion:'3.41.30',feedUrl:'',availableVersion:null,progress:null,error:null,installAllowed:false,lastCheckedAt:null,...${JSON.stringify(initial)}};window.__updateCalls=[];window.__updateListeners=[];window.__updateRequests=[];window.__stateRequests=[];window.__updateStateReads=0;
+      window.launcherDesktop=Object.freeze({getAppInfo:async()=>({version:'3.41.30',packaged:true}),getUpdateState:async()=>{__updateStateReads++;const initial={...__updates};if(window.__deferState)await new Promise(resolve=>__stateRequests.push(resolve));return initial;},
+        configureUpdateFeed:async url=>{__updateCalls.push(['configure',url]);if(window.__deferConfigure)await new Promise(resolve=>__updateRequests.push(resolve));return {...__updates,feedUrl:url,status:url?'idle':'setup',lastCheckedAt:null};},
         checkForUpdates:async()=>{__updateCalls.push(['check']);return {...__updates,status:'checking'};},
         restartAndInstall:async()=>{__updateCalls.push(['install']);return {...__updates,status:'installing'};},
         onUpdateState:callback=>{__updateListeners.push(callback);return ()=>{__updateListeners=__updateListeners.filter(c=>c!==callback);};}});
@@ -103,12 +103,83 @@ if(!process.versions.electron){
       await respond('/__modpacks/status',active({job:'export',jobId:'export-owned'}));
       assert.equal(await run(`document.querySelector('.__hx-primary').disabled`),true);
     });
-    await check('update setup uses the facade version and preserves feed draft and focus across progress events',async()=>{
+    await check('update source draft survives progress events while busy updates block editing',async()=>{
       await updater();await ready(`!!document.querySelector('#__hx-update-feed')`);
-      assert.match(await run(`document.querySelector('#__hx-screen').textContent`),/3\.41\.30/);assert.match(await run(`document.querySelector('#__hx-screen').textContent`),/host.*later|hosted release/i);
-      await run(`const feed=document.querySelector('#__hx-update-feed');feed.value='https://releases.example.invalid/my-draft/';feed.focus();feed.setSelectionRange(8,16);__updates={...__updates,status:'downloading',feedUrl:'https://saved.example.invalid/',availableVersion:'3.41.31',progress:{percent:42,transferred:42,total:100,bytesPerSecond:2}};__updateListeners.forEach(c=>c(__updates));`);
-      assert.deepEqual(await run(`({value:document.querySelector('#__hx-update-feed').value,focus:document.activeElement.id,start:document.activeElement.selectionStart,end:document.activeElement.selectionEnd})`),{value:'https://releases.example.invalid/my-draft/',focus:'__hx-update-feed',start:8,end:16});
-      assert.match(await run(`document.querySelector('#__hx-update-status').textContent`),/42%/);
+      assert.match(await run(`document.querySelector('#__hx-screen').textContent`),/3\.41\.30/);
+      await run(`const feed=document.querySelector('#__hx-update-feed');feed.value='https://releases.example.invalid/my-draft/';feed.dispatchEvent(new Event('input',{bubbles:true}));feed.focus();feed.setSelectionRange(8,16);__updates={...__updates,status:'downloading',feedUrl:'https://saved.example.invalid/',availableVersion:'3.41.31',progress:{percent:42,transferred:42,total:100,bytesPerSecond:2}};__updateListeners.forEach(c=>c(__updates));__updates={...__updates,progress:{...__updates.progress,percent:43}};__updateListeners.forEach(c=>c(__updates));`);
+      assert.deepEqual(await run(`(() => {const f=document.querySelector('#__hx-update-feed');return {value:f.value,disabled:f.disabled,start:f.selectionStart,end:f.selectionEnd};})()`),{value:'https://releases.example.invalid/my-draft/',disabled:true,start:8,end:16});
+      assert.match(await run(`document.querySelector('#__hx-update-status').textContent`),/43%/);
+    });
+    await check('Use GitHub replaces the draft and saves the repository through the facade once',async()=>{
+      await updater({status:'idle',feedUrl:'https://custom.example.invalid/releases/'});
+      assert.equal(await run(`!!document.querySelector('[data-hx-update-github]')`),true,'Use GitHub action should be available');
+      await run(`window.__deferConfigure=true;const f=document.querySelector('#__hx-update-feed');f.value='https://draft.example.invalid/';f.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('[data-hx-update-github]').click();`);
+      await ready(`__updateRequests.length===1`);
+      assert.deepEqual(await run(`__updateCalls`),[['configure','https://github.com/abdulmunthakimwork/minecraft-launcher/']]);
+      assert.equal(await run(`document.querySelector('#__hx-update-feed').value`),'https://github.com/abdulmunthakimwork/minecraft-launcher/');
+      assert.deepEqual(await run(`['#__hx-update-feed','[data-hx-update-save]','[data-hx-update-github]','[data-hx-update-check]','[data-hx-update-install]'].map(q=>document.querySelector(q).disabled)`),[true,true,true,true,true]);
+      await run(`document.querySelector('[data-hx-update-github]').dispatchEvent(new Event('click',{bubbles:true}));document.querySelector('[data-hx-update-save]').dispatchEvent(new Event('click',{bubbles:true}));__updates={...__updates,feedUrl:'https://saved.example.invalid/'};__updateListeners.forEach(c=>c(__updates));`);
+      assert.equal(await run(`document.querySelector('#__hx-update-feed').value`),'https://github.com/abdulmunthakimwork/minecraft-launcher/');
+      assert.equal(await run(`__updateCalls.length`),1);
+      await run(`__updateRequests.shift()();`);await ready(`!document.querySelector('[data-hx-update-save]').disabled`);
+      assert.equal(await run(`document.querySelector('#__hx-update-feed').value`),'https://github.com/abdulmunthakimwork/minecraft-launcher/');
+    });
+    await check('checking downloading and installing reject source actions and keep a typed custom draft',async()=>{
+      await updater({status:'idle',feedUrl:'https://saved.example.invalid/'});
+      assert.equal(await run(`!!document.querySelector('[data-hx-update-github]')`),true,'Use GitHub action should be available');
+      await run(`const f=document.querySelector('#__hx-update-feed');f.value='https://custom.example.invalid/keep-this/';f.dispatchEvent(new Event('input',{bubbles:true}));f.blur();`);
+      for(const phase of ['checking','downloading','installing']){
+        await run(`__updates={...__updates,status:${JSON.stringify(phase)},feedUrl:'https://github.com/abdulmunthakimwork/minecraft-launcher/'};__updateListeners.forEach(c=>c(__updates));`);
+        assert.deepEqual(await run(`['#__hx-update-feed','[data-hx-update-save]','[data-hx-update-github]','[data-hx-update-check]'].map(q=>document.querySelector(q).disabled)`),[true,true,true,true],phase+' should prevent source changes');
+        await run(`document.querySelector('[data-hx-update-github]').dispatchEvent(new Event('click',{bubbles:true}));document.querySelector('[data-hx-update-save]').dispatchEvent(new Event('click',{bubbles:true}));`);
+        assert.deepEqual(await run(`__updateCalls`),[],phase+' should not call configure');
+        assert.equal(await run(`document.querySelector('#__hx-update-feed').value`),'https://custom.example.invalid/keep-this/');
+      }
+      await run(`__updates={...__updates,status:'idle'};__updateListeners.forEach(c=>c(__updates));`);
+      assert.deepEqual(await run(`['#__hx-update-feed','[data-hx-update-save]','[data-hx-update-github]'].map(q=>document.querySelector(q).disabled)`),[false,false,false]);
+      assert.equal(await run(`document.querySelector('#__hx-update-feed').value`),'https://custom.example.invalid/keep-this/');
+    });
+    await check('the browser view and closed dialog cannot invoke desktop update actions',async()=>{
+      await fixture();await run(`__fiveUI.openUpdatesDialog();`);await pause(30);
+      assert.equal(await run(`!!document.querySelector('[data-hx-update-github]')`),true,'Use GitHub action should remain visible in a browser view');
+      assert.deepEqual(await run(`['#__hx-update-feed','[data-hx-update-save]','[data-hx-update-github]','[data-hx-update-check]','[data-hx-update-install]'].map(q=>document.querySelector(q).disabled)`),[true,true,true,true,true]);
+      assert.match(await run(`document.querySelector('#__hx-update-status').textContent`),/desktop app.*browser view/i);
+      await updater({status:'idle',feedUrl:'https://saved.example.invalid/'});
+      await run(`window.__closedUpdateControls=['[data-hx-update-save]','[data-hx-update-github]','[data-hx-update-check]'].map(q=>document.querySelector(q));document.querySelector('.__hx-close').click();__closedUpdateControls.forEach(b=>b.dispatchEvent(new Event('click',{bubbles:true})));`);await pause(30);
+      assert.deepEqual(await run(`__updateCalls`),[]);assert.equal(await run(`__updateListeners.length`),0);
+    });
+    await check('an unchecked idle source never claims Up to date until a successful check is reported',async()=>{
+      await updater({status:'idle',feedUrl:'https://github.com/abdulmunthakimwork/minecraft-launcher/'});
+      assert.doesNotMatch(await run(`document.querySelector('#__hx-update-status').textContent`),/up to date/i);
+      await run(`__updates={...__updates,status:'idle',lastCheckedAt:'2026-11-11T12:00:00.000Z'};__updateListeners.forEach(c=>c(__updates));`);
+      assert.match(await run(`document.querySelector('#__hx-update-status').textContent`),/up to date/i);
+    });
+    await check('the Settings entry announces a verified ready update and opens the existing review dialog',async()=>{
+      await updater({status:'ready',feedUrl:'https://github.com/abdulmunthakimwork/minecraft-launcher/',availableVersion:'3.41.31',installAllowed:false});
+      await run(`document.querySelector('.__hx-close').click();__fiveUI.injectUpdatesButton();`);await pause(30);
+      assert.equal(await run(`document.querySelector('#__hx-updates button span').textContent`),'Launcher update ready');
+      assert.match(await run(`document.querySelector('#__hx-updates button').getAttribute('aria-label')`),/3\.41\.31/);
+      await run(`document.querySelector('#__hx-updates button').click();`);await pause(30);
+      assert.match(await run(`document.querySelector('#__hx-update-status').textContent`),/downloaded and verified/i);
+      assert.deepEqual(await run(`__updateCalls`),[]);
+      await run(`document.querySelector('.__hx-close').click();__updates={...__updates,status:'checking',availableVersion:null};__updateListeners.forEach(c=>c(__updates));`);
+      assert.equal(await run(`document.querySelector('#__hx-updates button span').textContent`),'Launcher updates');
+      assert.equal(await run(`document.querySelector('#__hx-updates button').hasAttribute('aria-label')`),false);
+    });
+    await check('Settings remounts reuse one update listener and a late read cannot erase a ready indication',async()=>{
+      await updater({status:'idle',feedUrl:'https://github.com/abdulmunthakimwork/minecraft-launcher/'});
+      await run(`document.querySelector('.__hx-close').click();window.__deferState=true;__fiveUI.injectUpdatesButton();`);await pause(30);
+      assert.equal(await run(`__updateListeners.length`),1,'Settings entry should subscribe once');
+      assert.equal(await run(`__stateRequests.length`),1);
+      await run(`__updates={...__updates,status:'ready',availableVersion:'3.41.31'};__updateListeners.forEach(c=>c(__updates));__stateRequests.shift()();`);await pause(30);
+      assert.equal(await run(`document.querySelector('#__hx-updates button span').textContent`),'Launcher update ready');
+      await run(`document.querySelector('main').innerHTML='<h1>Settings</h1>';__fiveUI.injectUpdatesButton();__fiveUI.injectUpdatesButton();`);await pause(30);
+      assert.equal(await run(`document.querySelectorAll('#__hx-updates').length`),1);
+      assert.equal(await run(`__updateListeners.length`),1);
+      assert.equal(await run(`__updateStateReads`),2,'Initial dialog and entry read should each run once');
+      assert.equal(await run(`document.querySelector('#__hx-updates button span').textContent`),'Launcher update ready');
+      await run(`__updates={...__updates,status:'error',error:'Disconnected'};__updateListeners.forEach(c=>c(__updates));`);
+      assert.equal(await run(`document.querySelector('#__hx-updates button span').textContent`),'Launcher updates');
     });
     await check('restart and install is blocked during work and requires an explicit click when ready',async()=>{
       await updater();await run(`__updates={...__updates,status:'ready',availableVersion:'3.41.31',installAllowed:false};__updateListeners.forEach(c=>c(__updates));`);
@@ -140,9 +211,11 @@ if(!process.versions.electron){
       assert.ok(await run(`!!document.querySelector('#__hx-screen a[href="https://www.minecraft.net/en-us/store/minecraft-java-bedrock-edition-pc"]')`));
     });
     await check('larger update text fits the minimum window and keeps footer actions reachable',async()=>{
-      await updater();await run(`__host.appData.launcherSettings.useMagnifiedMode=true;__fiveUI.openUpdatesDialog();`);await pause(30);
-      const metrics=await run(`(() => {const s=document.querySelector('#__hx-screen'),f=s.querySelector('.__hx-foot');return {width:innerWidth,scroll:s.scrollWidth,footer:f.getBoundingClientRect().bottom,height:innerHeight,font:getComputedStyle(document.querySelector('#__hx-update-feed')).fontSize};})()`);
-      assert.ok(metrics.scroll<=metrics.width+1);assert.ok(metrics.footer<=metrics.height+1);assert.equal(metrics.font,'20px');
+      await updater({status:'ready',feedUrl:'https://github.com/abdulmunthakimwork/minecraft-launcher/',availableVersion:'3.41.31',installAllowed:true,lastCheckedAt:'2026-11-11T12:00:00.000Z'});await run(`__host.appData.launcherSettings.useMagnifiedMode=true;__fiveUI.openUpdatesDialog();`);await pause(30);
+      const metrics=await run(`(() => {const s=document.querySelector('#__hx-screen'),f=s.querySelector('.__hx-foot');return {width:innerWidth,scroll:s.scrollWidth,footer:f.getBoundingClientRect().bottom,height:innerHeight,font:getComputedStyle(document.querySelector('#__hx-update-feed')).fontSize,buttons:[...f.querySelectorAll('button:not([hidden])')].map(b=>{const r=b.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};})};})()`);
+      assert.ok(metrics.scroll<=metrics.width+1);assert.ok(metrics.footer<=metrics.height+1);assert.equal(metrics.font,'20px');assert.equal(metrics.buttons.length,5);
+      for(const b of metrics.buttons){assert.ok(b.left>=0&&b.right<=metrics.width&&b.bottom<=metrics.height);}
+      for(let i=1;i<metrics.buttons.length;i++){const before=metrics.buttons[i-1],after=metrics.buttons[i];assert.ok(after.top>=before.bottom||after.left>=before.right+7,'Footer buttons need room between targets');}
       fs.writeFileSync(path.join(output,'updates-large-minimum.png'),(await win.webContents.capturePage()).toPNG());
     });
     fs.writeFileSync(path.join(output,'report.json'),JSON.stringify({output,results},null,2));console.log(JSON.stringify({output,results},null,2));win.destroy();app.exit(results.some(r=>!r.ok)?1:0);

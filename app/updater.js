@@ -4,6 +4,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {spawn} = require('node:child_process');
 
+const GITHUB_UPDATE_SOURCE = Object.freeze({url: 'https://github.com/abdulmunthakimwork/minecraft-launcher/',
+  owner: 'abdulmunthakimwork', repo: 'minecraft-launcher', repositoryId: '1453904618'});
 const UPDATE_CHANNEL = 'launcher-desktop:update-state';
 const IPC_CHANNELS = Object.freeze({info: 'launcher-desktop:info', state: 'launcher-desktop:update-state:get',
   configure: 'launcher-desktop:update-feed:set', check: 'launcher-desktop:update-check',
@@ -26,6 +28,27 @@ function isPermittedUpdateUrl(target, feedUrl) {
   if (!feedUrl) return false;
   try {
     const url = new URL(target), feed = new URL(feedUrl);
+    if (feed.href === GITHUB_UPDATE_SOURCE.url) {
+      // Check the original path as well as URL's normalized path: URL parsing
+      // removes dot segments, which must not disguise a disallowed request.
+      const rawPath = /^https:\/\/[^/?#]+([^?#]*)/i.exec(String(target))?.[1];
+      if (url.protocol !== 'https:' || url.port || url.username || url.password || url.hash ||
+          rawPath !== url.pathname || /%|\\/.test(rawPath)) return false;
+      if (url.hostname === 'release-assets.githubusercontent.com') {
+        return new RegExp(`^/github-production-release-asset/${GITHUB_UPDATE_SOURCE.repositoryId}/` +
+          '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', 'i').test(url.pathname);
+      }
+      if (url.hostname !== 'github.com' || url.search) return false;
+      const releases = `/${GITHUB_UPDATE_SOURCE.owner}/${GITHUB_UPDATE_SOURCE.repo}/releases`;
+      if (url.pathname === releases + '.atom' || url.pathname === releases + '/latest') return true;
+      if (!url.pathname.startsWith(releases + '/')) return false;
+      const relative = url.pathname.slice(releases.length);
+      const match = /^\/(?:tag|download)\/v([^/]+)(?:\/([^/]+))?$/.exec(relative);
+      if (!match) return false;
+      versionParts(match[1]);
+      if (relative.startsWith('/tag/')) return match[2] === undefined;
+      return match[2] === 'latest.yml' || match[2] === `Minecraft-Launcher-Setup-${match[1]}.exe`;
+    }
     return url.protocol === 'https:' && url.origin === feed.origin && !url.username && !url.password && !url.hash &&
       url.pathname.startsWith(feed.pathname) && !/%2f|%5c|%00/i.test(url.pathname);
   } catch {return false;}
@@ -137,12 +160,17 @@ function launchNsisInstaller(installer, options = {}) {
   });
 }
 
-function publicError(error) {
+function publicError(error, github = false) {
   const message = String(error && (error.code || error.message) || error || 'Unknown update error');
   if (/CHECKSUM|checksum|verification|SHA-512|size/i.test(message)) {
     return 'The installer failed size or checksum verification. Check the hosted release files and try again.';
   }
-  if (/CHANNEL_FILE_NOT_FOUND|404/.test(message)) return 'latest.yml was not found in the configured update directory. Check the hosted release files.';
+  if (/CHANNEL_FILE_NOT_FOUND|404/.test(message)) return github
+    ? 'latest.yml was not found in the latest stable GitHub release. Check the published release files and try again.'
+    : 'latest.yml was not found in the configured update directory. Check the hosted release files.';
+  if (github && /LATEST_VERSION_NOT_FOUND|NO_PUBLISHED_VERSIONS|INVALID_RELEASE_FEED/.test(message)) {
+    return 'The latest stable GitHub release could not be found. Check the published release and connection, then try again.';
+  }
   if (/ENOTFOUND|ECONN|CERT|SSL|TIMEDOUT|ERR_FAILED|network/i.test(message)) {
     return 'The HTTPS update source could not be reached securely. Check the feed address and connection, then try again.';
   }
@@ -170,9 +198,13 @@ class UpdaterController extends EventEmitter {
         const value = JSON.parse(fs.readFileSync(this.configFile, 'utf8'));
         if (value.schemaVersion === 1) feedUrl = validateFeed(value.feedUrl);
       }
-    } catch { /* Missing or invalid setup performs no network work. */ }
+    } catch (error) {
+      // Only a missing choice inherits the injected default. Invalid saved
+      // configuration stays disabled, and an explicitly saved empty URL wins.
+      if (error.code === 'ENOENT' && options.defaultFeedUrl !== undefined) feedUrl = validateFeed(options.defaultFeedUrl);
+    }
     this.state = {status: feedUrl ? 'idle' : 'setup', currentVersion: options.currentVersion,
-      feedUrl, availableVersion: null, progress: null, error: null, installAllowed: false};
+      feedUrl, availableVersion: null, progress: null, error: null, installAllowed: false, lastCheckedAt: null};
     this.updater.autoDownload = false; // Validate metadata before permitting acquisition.
     this.updater.autoInstallOnAppQuit = false;
     this.updater.autoRunAppAfterInstall = true;
@@ -202,7 +234,9 @@ class UpdaterController extends EventEmitter {
   }
 
   _applyFeed() {
-    this.updater.setFeedURL({provider: 'generic', url: this.state.feedUrl, channel: 'latest', useMultipleRangeRequest: false});
+    this.updater.setFeedURL(this.state.feedUrl === GITHUB_UPDATE_SOURCE.url
+      ? {provider: 'github', owner: GITHUB_UPDATE_SOURCE.owner, repo: GITHUB_UPDATE_SOURCE.repo, channel: 'latest'}
+      : {provider: 'generic', url: this.state.feedUrl, channel: 'latest', useMultipleRangeRequest: false});
   }
 
   async configureFeed(value) {
@@ -215,7 +249,7 @@ class UpdaterController extends EventEmitter {
       fs.renameSync(temporary, this.configFile);
     } finally {try {fs.unlinkSync(temporary);} catch {}}
     this.staged = null;
-    this._set({feedUrl, status: feedUrl ? 'idle' : 'setup', availableVersion: null, progress: null, error: null, installAllowed: false});
+    this._set({feedUrl, status: feedUrl ? 'idle' : 'setup', availableVersion: null, progress: null, error: null, installAllowed: false, lastCheckedAt: null});
     if (feedUrl) this._applyFeed();
     if (this.started && feedUrl) setImmediate(() => this.checkForUpdates());
     return this.getState();
@@ -236,9 +270,14 @@ class UpdaterController extends EventEmitter {
       if (!this.options.isPackaged) throw new Error('The update checker requires an installed launcher.');
       const result = await this.updater.checkForUpdates();
       if (!result) throw new Error('The update checker did not return release metadata.');
+      if (this.state.feedUrl === GITHUB_UPDATE_SOURCE.url) {
+        const info = result.updateInfo;
+        versionParts(info && info.version);
+        if (info.tag !== `v${info.version}`) throw new Error('The update release tag does not match its stable metadata version.');
+      }
       if (result.isUpdateAvailable === false) {
         versionParts(result.updateInfo && result.updateInfo.version);
-        this._set({status: 'idle'});
+        this._set({status: 'idle', lastCheckedAt: new Date().toISOString()});
         return this.getState();
       }
       const expected = validateUpdateInfo(result.updateInfo, this.options.currentVersion);
@@ -248,7 +287,7 @@ class UpdaterController extends EventEmitter {
       if (!Array.isArray(paths) || paths.length !== 1) throw new Error('The staged update did not contain one installer.');
       await verifyInstaller(paths[0], expected);
       this.staged = {filename: paths[0], expected};
-      this._set({status: 'ready', progress: {percent: 100, transferred: expected.size, total: expected.size, bytesPerSecond: 0}, error: null});
+      this._set({status: 'ready', progress: {percent: 100, transferred: expected.size, total: expected.size, bytesPerSecond: 0}, error: null, lastCheckedAt: new Date().toISOString()});
       await this.refreshInstallAllowed();
     } catch (error) {await this._fail(error);}
     return this.getState();
@@ -297,7 +336,7 @@ class UpdaterController extends EventEmitter {
   async _fail(error) {
     this.installLaunchConfirmed = false;
     this.staged = null;
-    this._set({status: 'error', error: publicError(error), installAllowed: false, progress: null});
+    this._set({status: 'error', error: publicError(error, this.state.feedUrl === GITHUB_UPDATE_SOURCE.url), installAllowed: false, progress: null});
     if (this.reserved) {
       this.reserved = false;
       try {await this.options.abortUpdateRestart();} catch {
@@ -362,4 +401,4 @@ function registerDesktopIpc({ipcMain, controller, getWindow, getLauncherUrl, get
 }
 
 module.exports = {UpdaterController, validateFeed, validateUpdateInfo, verifyInstaller, launchNsisInstaller, isPermittedUpdateUrl,
-  IPC_CHANNELS, UPDATE_CHANNEL, registerDesktopIpc, trustedDesktopSender};
+  GITHUB_UPDATE_SOURCE, IPC_CHANNELS, UPDATE_CHANNEL, registerDesktopIpc, trustedDesktopSender};

@@ -21,7 +21,7 @@ const http = require("http");
 const net = require("net");
 const path = require("path");
 const { LauncherLifecycle, createLifecycleHost } = require("./lifecycle");
-const {UpdaterController, registerDesktopIpc, launchNsisInstaller, isPermittedUpdateUrl} = require("./updater");
+const {UpdaterController, registerDesktopIpc, launchNsisInstaller, isPermittedUpdateUrl, GITHUB_UPDATE_SOURCE} = require("./updater");
 
 const APP_ID = "app.mclauncher.desktop";
 const APP_NAME = "Minecraft Launcher";
@@ -576,12 +576,12 @@ async function abortUpdateRestart() {
 function beginUpdater() {
   const {NsisUpdater} = require("electron-updater");
   const updater = new NsisUpdater();
-  updaterController = new UpdaterController({updater, userData: USER_DATA,
+  updaterController = new UpdaterController({updater, userData: USER_DATA, defaultFeedUrl: GITHUB_UPDATE_SOURCE.url,
     currentVersion: app.getVersion(), isPackaged, isUpdateInstallSafe, prepareUpdateRestart, abortUpdateRestart,
     launchInstaller: (installer, options) => launchNsisInstaller(installer, Object.assign({}, options,
       {resourcesPath: process.resourcesPath})), quitForUpdate});
-  // electron-updater uses its own session. Enforce HTTPS and the configured
-  // directory for metadata, installers and every redirected request.
+  // electron-updater uses its own session. Scope generic sources to their
+  // directory and GitHub requests to this repository and its release CDN.
   session.fromPartition("electron-updater", {cache: false}).webRequest.onBeforeRequest((details, callback) => {
     callback({cancel: !isPermittedUpdateUrl(details.url, updaterController.getState().feedUrl)});
   });

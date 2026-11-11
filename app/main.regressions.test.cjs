@@ -368,6 +368,7 @@ test('updater initialization binds a dedicated secure session before any configu
     mainWindow: null, launcherUrl: 'http://127.0.0.1:4312', updaterController: null, disposeDesktopIpc: null,
     process: {argv: []}, isUpdateInstallSafe: async () => true, prepareUpdateRestart: async () => true, abortUpdateRestart: async () => {},
     ipcMain: {}, isPermittedUpdateUrl: require('./updater').isPermittedUpdateUrl,
+    GITHUB_UPDATE_SOURCE: {url: 'https://github.com/abdulmunthakimwork/minecraft-launcher/'},
     require(name) {assert.equal(name, 'electron-updater'); return {NsisUpdater: EventEmitter};},
     UpdaterController: class {
       constructor(options) {this.options = options;}
@@ -386,6 +387,9 @@ test('updater initialization binds a dedicated secure session before any configu
   const begin = extract('function beginUpdater(', 'function quitForUpdate(', 'beginUpdater', scope);
   begin();
   assert.deepEqual(order, ['guard', 'ipc', 'start']);
+  assert.equal(scope.updaterController.options.defaultFeedUrl,
+    'https://github.com/abdulmunthakimwork/minecraft-launcher/',
+    'Installed launchers must receive the default GitHub source before automatic checks start');
   for (const [url, expected] of [
     ['https://updates.example.test/launcher/latest.yml', false],
     ['http://updates.example.test/launcher/latest.yml', true],

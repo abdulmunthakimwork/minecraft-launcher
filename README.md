@@ -2,9 +2,9 @@
 
 A Windows desktop launcher host with an Electron shell and Python backend. This repository contains the authored host, bridge, launcher extensions and regression tests. It works with a locally supplied extracted launcher interface; that interface and its captured media are not included in this source snapshot.
 
-Version: **3.41.30**. Download the Windows setup or portable build from [Releases](https://github.com/abdulmunthakimwork/minecraft-launcher/releases).
+Version: **3.41.31**. Download the Windows setup or portable build from [Releases](https://github.com/abdulmunthakimwork/minecraft-launcher/releases).
 
-Features include Java installations and mod loaders, a compatible mod browser, dependency repair, transactional content changes, modpack import/export, offline profiles, Microsoft sign-in setup, download controls, background game lifecycle, local crash explanations and verified launcher-update preparation.
+Features include Java installations and mod loaders, a compatible mod browser, dependency repair, transactional content changes, modpack import/export, offline profiles, Microsoft sign-in setup, download controls, background game lifecycle, local crash explanations and verified GitHub launcher updates.
 
 Microsoft sign-in requires your own registered public Microsoft client ID. Bedrock launch, Realms management, Marketplace purchases and messaging are not implemented here; their screens provide official destinations. This is a reconstruction project and is not an official Mojang or Microsoft release. No project-wide source license is declared.
 

@@ -766,14 +766,16 @@
     });
   }
 
-  // The desktop shell owns update verification and installation. This dialog
-  // only reflects its state; no source is assumed before one is configured.
+  // The desktop shell owns the default source, verification and installation.
+  // This dialog reflects its state and preserves an edited source draft.
   function openUpdatesDialog() {
     var s = screen("Launcher updates");
     var desktop = window.launcherDesktop;
+    var githubSource = "https://github.com/abdulmunthakimwork/minecraft-launcher/";
     s.add('<p class="__hx-note" id="__hx-update-version">Reading launcher version…</p>');
-    s.add('<p class="__hx-note">Updates need a hosted release feed. Host the prepared release files later, then enter the HTTPS feed URL below. Checks download and verify an available update automatically. Installing it requires Restart and install.</p>');
-    s.add(field("__hx-update-feed", "HTTPS release feed URL", "https://your-host.example/releases/", ""));
+    s.add('<p class="__hx-note">GitHub is the default update source. With a source configured, the launcher checks at startup and every six hours, downloads and verifies updates automatically, then waits for you to choose Restart and install when the launcher is idle.</p>');
+    s.add(field("__hx-update-feed", "Update source", githubSource, ""));
+    s.add('<p class="__hx-note">Use the GitHub repository above or a custom HTTPS release directory. Leave the source empty to turn off automatic checks.</p>');
     s.add('<p class="__hx-error" id="__hx-update-status" role="status" aria-live="polite"></p>');
     s.add('<p class="__hx-note" id="__hx-update-install-reason" hidden></p>');
     var feed = s.body.querySelector("#__hx-update-feed");
@@ -783,8 +785,15 @@
     var state = null, pendingAction = false, feedTouched = false, feedInitialized = false, sequence = 0;
     var unsubscribe = null;
     s.button("Close", false, s.close);
-    var save = s.button("Save feed", false, saveFeed);
+    var save = s.button("Save source", false, saveFeed);
     save.setAttribute("data-hx-update-save", "");
+    var useGithub = s.button("Use GitHub", false, function () {
+      if (!s.el.isConnected || useGithub.disabled) return;
+      feed.value = githubSource;
+      feedTouched = true;
+      saveFeed();
+    });
+    useGithub.setAttribute("data-hx-update-github", "");
     var check = s.button("Check for updates", false, function () { action("checkForUpdates"); });
     check.setAttribute("data-hx-update-check", "");
     var install = s.button("Restart and install", true, function () {
@@ -792,6 +801,7 @@
     });
     install.setAttribute("data-hx-update-install", "");
     install.setAttribute("aria-describedby", reason.id);
+    feed.disabled = save.disabled = useGithub.disabled = check.disabled = install.disabled = true;
     feed.addEventListener("input", function () { feedTouched = true; });
     s.el.addEventListener("__hxclose", function () {
       sequence++;
@@ -812,28 +822,32 @@
       feedInitialized = true;
       if (next.currentVersion) version.textContent = "Installed launcher version: " + next.currentVersion;
       var busy = pendingAction || ["checking", "downloading", "installing"].indexOf(next.status) >= 0;
-      save.disabled = pendingAction || next.status === "installing";
+      feed.disabled = save.disabled = useGithub.disabled = busy;
       check.disabled = busy || !next.feedUrl;
       check.querySelector("span").textContent = next.status === "error" ? "Retry update check" : "Check for updates";
       install.hidden = next.status !== "ready" && next.status !== "installing";
       install.disabled = pendingAction || next.status !== "ready" || !next.installAllowed;
       reason.hidden = next.status !== "ready" || !!next.installAllowed;
       reason.textContent = reason.hidden ? "" : "Finish any running game, download or installation work before restarting to install the update.";
-      if (next.status === "setup") notice("No update source configured. Add the HTTPS URL after your release feed is hosted.");
-      else if (next.status === "checking") notice("Checking the configured release feed…");
+      if (next.status === "setup") notice("Automatic update checks are off. Use GitHub or save a custom HTTPS release directory to turn them on.");
+      else if (next.status === "checking") notice("Checking the configured update source…");
       else if (next.status === "downloading") {
         var p = next.progress;
         var percent = p && Number.isFinite(Number(p.percent)) ? Math.min(100, Math.max(0, Number(p.percent))) : null;
         notice("Downloading launcher " + (next.availableVersion || "update") +
           (percent == null ? "…" : " — " + Math.round(percent) + "%") +
           (p && p.total ? " (" + sizeText(p.transferred) + " / " + sizeText(p.total) + ")" : "") + ". Verification runs before installation.");
-      } else if (next.status === "ready") notice("Launcher " + (next.availableVersion || "update") + " is downloaded and verified. Restart and install when you are ready.");
+      } else if (next.status === "ready") notice("Launcher " + (next.availableVersion || "update") + " is downloaded and verified. Restart and install when the launcher is idle.");
       else if (next.status === "installing") notice("Restarting to install the verified launcher update…");
-      else if (next.status === "error") notice(next.error || "The update check failed. Retry when the release feed is available.", true);
-      else notice(next.availableVersion ? "Available launcher version: " + next.availableVersion : "The HTTPS release feed is configured. Check for updates to read its latest release.");
+      else if (next.status === "error") notice(next.error || "The update check failed. Retry when the update source is available.", true);
+      else if (next.status === "idle" && next.lastCheckedAt) notice("Up to date. The launcher checks again automatically every six hours.");
+      else notice(next.availableVersion ? "Available launcher version: " + next.availableVersion : "The update source is configured. The launcher checks automatically at startup and every six hours, or you can check now.");
     }
     async function action(method, value) {
-      if (!desktop || pendingAction || typeof desktop[method] !== "function") return;
+      if (!s.el.isConnected || !desktop || !state || pendingAction || typeof desktop[method] !== "function") return;
+      if ((method === "configureUpdateFeed" && save.disabled) ||
+          (method === "checkForUpdates" && check.disabled) ||
+          (method === "restartAndInstall" && install.disabled)) return;
       pendingAction = true;
       if (state) render(state);
       var token = sequence;
@@ -851,6 +865,7 @@
       }
     }
     function saveFeed() {
+      if (!s.el.isConnected || save.disabled) return;
       var value = feed.value.trim();
       if (value) {
         try {
@@ -858,7 +873,7 @@
           if (url.protocol !== "https:" || url.username || url.password || url.hash) throw new Error();
         } catch (_) {
           feed.setAttribute("aria-invalid", "true");
-          notice("Enter an HTTPS release feed URL without credentials or a fragment. Leave it empty to clear the source.", true);
+          notice("Enter an HTTPS GitHub repository or release directory URL without credentials or a fragment. Leave it empty to turn off automatic checks.", true);
           return;
         }
       }
@@ -866,7 +881,6 @@
       action("configureUpdateFeed", value);
     }
     if (!desktop || typeof desktop.getUpdateState !== "function") {
-      save.disabled = check.disabled = install.disabled = true;
       install.hidden = true;
       notice("Launcher updates are available in the desktop app. This browser view cannot configure or install them.");
       version.textContent = "Desktop launcher version unavailable in this view.";
@@ -882,9 +896,47 @@
     }).catch(function () {});
   }
 
+  // One page-level subscription serves the current Settings entry. React can
+  // replace that entry without retaining detached nodes or adding listeners.
+  var updatesEntryDesktop = null, updatesEntryState = null, updatesEntryUnsubscribe = null, updatesEntryRevision = 0;
+  function renderUpdatesEntry() {
+    var entry = document.querySelector("#__hx-updates button");
+    if (!entry) return;
+    var ready = updatesEntryState && updatesEntryState.status === "ready";
+    var label = ready ? "Launcher update ready" : "Launcher updates";
+    var text = entry.querySelector("span");
+    if (text && text.textContent !== label) text.textContent = label;
+    if (ready) {
+      var description = label + (updatesEntryState.availableVersion ? ": version " + updatesEntryState.availableVersion : "") + ". Review and restart when ready.";
+      if (entry.getAttribute("aria-label") !== description) entry.setAttribute("aria-label", description);
+    } else entry.removeAttribute("aria-label");
+  }
+  function watchUpdatesEntry() {
+    var desktop = window.launcherDesktop;
+    if (!desktop || typeof desktop.getUpdateState !== "function") return;
+    if (updatesEntryDesktop === desktop) { renderUpdatesEntry(); return; }
+    if (typeof updatesEntryUnsubscribe === "function") updatesEntryUnsubscribe();
+    updatesEntryDesktop = desktop;
+    updatesEntryState = null;
+    updatesEntryUnsubscribe = null;
+    updatesEntryRevision++;
+    function receive(next) {
+      if (updatesEntryDesktop !== desktop || !next) return;
+      updatesEntryState = next;
+      updatesEntryRevision++;
+      renderUpdatesEntry();
+    }
+    if (typeof desktop.onUpdateState === "function") updatesEntryUnsubscribe = desktop.onUpdateState(receive);
+    var initial = updatesEntryRevision;
+    desktop.getUpdateState().then(function (next) {
+      if (updatesEntryDesktop === desktop && initial === updatesEntryRevision) receive(next);
+    }).catch(function () {});
+    renderUpdatesEntry();
+  }
   function injectUpdatesButton() {
     var main = document.querySelector("main");
-    if (!main || main.querySelector("#__hx-updates")) return;
+    if (!main) return;
+    if (main.querySelector("#__hx-updates")) { watchUpdatesEntry(); return; }
     var anchor = main.querySelector("#keepLauncherOpen") || main.querySelector("h1");
     if (!anchor) return;
     ensureStyle();
@@ -899,7 +951,8 @@
     entry.addEventListener("click", function (event) { event.preventDefault(); openUpdatesDialog(); });
     group.appendChild(entry);
     var row = anchor.closest("label") || anchor.parentElement;
-    row.insertAdjacentElement("afterend", group);
+    (row === main ? anchor : row).insertAdjacentElement("afterend", group);
+    watchUpdatesEntry();
   }
 
   var UNSUPPORTED = {

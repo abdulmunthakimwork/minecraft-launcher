@@ -45,6 +45,151 @@ function fixture(t, options = {}) {
   return {controller, engine, info, bytes, dir, admissions, setSafe: value => {safe = value;}};
 }
 
+const githubFeed = 'https://github.com/abdulmunthakimwork/minecraft-launcher/';
+const githubReleases = githubFeed.slice(0, -1) + '/releases';
+const githubCdn = 'https://release-assets.githubusercontent.com/github-production-release-asset/1453904618/9ba8181c-b438-4b5b-91c2-7c89a08c5314';
+
+test('missing config uses the injected GitHub default without automatically starting a check', async t => {
+  const {controller, engine, dir} = fixture(t, {defaultFeedUrl: githubFeed});
+  assert.equal(controller.getState().status, 'idle');
+  assert.equal(controller.getState().feedUrl, githubFeed);
+  assert.equal(engine.checkCalls, 0);
+  assert.equal(fs.existsSync(path.join(dir, 'update-feed.json')), false);
+  assert.equal(controller.getState().lastCheckedAt, null);
+  assert.deepEqual(engine.feed, {provider: 'github', owner: 'abdulmunthakimwork', repo: 'minecraft-launcher', channel: 'latest'});
+  assert.deepEqual(implementation().GITHUB_UPDATE_SOURCE, {url: githubFeed,
+    owner: 'abdulmunthakimwork', repo: 'minecraft-launcher', repositoryId: '1453904618'});
+  assert.equal(Object.isFrozen(implementation().GITHUB_UPDATE_SOURCE), true);
+});
+
+test('GitHub default starts one automatic verified full download and records successful check time', async t => {
+  const {controller, engine, info} = fixture(t, {defaultFeedUrl: githubFeed});
+  assert.equal(controller.getState().feedUrl, githubFeed);
+  info.tag = 'v3.41.31';
+  const complete = new Promise(resolve => controller.on('state', value => {
+    if (value.status === 'ready' || value.status === 'error') resolve(value);
+  }));
+  controller.start(); controller.start();
+  const state = await complete;
+  assert.equal(state.status, 'ready', state.error);
+  assert.equal(engine.checkCalls, 1);
+  assert.equal(engine.installCalls, 0);
+  assert.equal(engine.autoDownload, false);
+  assert.equal(engine.autoInstallOnAppQuit, false);
+  assert.equal(engine.allowPrerelease, false);
+  assert.equal(engine.disableDifferentialDownload, true);
+  assert.equal(engine.disableWebInstaller, true);
+  assert.ok(Number.isFinite(Date.parse(state.lastCheckedAt)));
+});
+
+test('explicitly disabled or custom sources survive a new GitHub default', async t => {
+  const {controller, dir} = fixture(t);
+  for (const saved of ['', 'https://updates.example.test/custom/']) {
+    await controller.configureFeed(saved);
+    const engine = new EventEmitter(); engine.checkCalls = 0;
+    engine.setFeedURL = function(value) {this.feed = value;};
+    engine.checkForUpdates = async () => {engine.checkCalls++; return {isUpdateAvailable: false, updateInfo: {version: '3.41.30'}};};
+    const second = new (implementation().UpdaterController)({updater: engine, userData: dir,
+      currentVersion: '3.41.30', isPackaged: true, defaultFeedUrl: githubFeed});
+    t.after(() => second.stop());
+    assert.equal(second.getState().feedUrl, saved);
+    if (saved) assert.equal(engine.feed.provider, 'generic');
+    else {second.start(); await new Promise(setImmediate); assert.equal(engine.checkCalls, 0);}
+  }
+});
+
+test('invalid persisted config does not silently switch to the default source', async t => {
+  const {controller, dir} = fixture(t);
+  fs.writeFileSync(path.join(dir, 'update-feed.json'), '{invalid');
+  const second = new (implementation().UpdaterController)({updater: new EventEmitter(), userData: dir,
+    currentVersion: '3.41.30', isPackaged: true, defaultFeedUrl: githubFeed});
+  t.after(() => second.stop());
+  assert.equal(second.getState().status, 'setup');
+  assert.equal(controller.getState().status, 'setup');
+});
+
+test('GitHub source canonicalizes the repository URL and preserves custom generic feeds', async t => {
+  const {controller, engine} = fixture(t);
+  await controller.configureFeed(githubFeed.slice(0, -1));
+  assert.equal(controller.getState().feedUrl, githubFeed);
+  assert.equal(engine.feed.provider, 'github');
+  assert.equal(Object.hasOwn(engine.feed, 'private'), false);
+  assert.equal(Object.hasOwn(engine.feed, 'token'), false);
+  await controller.configureFeed('https://updates.example.test/custom');
+  assert.equal(engine.feed.provider, 'generic');
+  assert.equal(engine.feed.url, 'https://updates.example.test/custom/');
+});
+
+test('GitHub transport permits only stable discovery, matching setup files, and its repository CDN', () => {
+  const {isPermittedUpdateUrl} = implementation();
+  const allowed = [githubReleases + '.atom', githubReleases + '/latest', githubReleases + '/tag/v3.41.31',
+    githubReleases + '/download/v3.41.31/latest.yml',
+    githubReleases + '/download/v3.41.31/Minecraft-Launcher-Setup-3.41.31.exe',
+    githubCdn + '?sp=r&sv=2018-11-09&sig=signed-value&response-content-disposition=attachment%3B%20filename%3DMinecraft-Launcher-Setup-3.41.31.exe'];
+  for (const url of allowed) assert.equal(isPermittedUpdateUrl(url, githubFeed), true, url);
+  const denied = [githubFeed, githubReleases, githubReleases + '/latest?token=secret',
+    githubReleases + '/download/v3.41.31/Minecraft-Launcher-Setup-3.41.30.exe',
+    githubReleases + '/download/v3.41.31/Minecraft-Launcher-3.41.31-Portable.exe',
+    githubReleases + '/download/v3.41.31/Minecraft-Launcher-Setup-3.41.31.exe.blockmap',
+    githubReleases + '/download/v3.41.31-beta.1/latest.yml', githubReleases + '/download/3.41.31/latest.yml',
+    githubReleases + '/download/v03.41.31/latest.yml', githubReleases + '/download/v9007199254740992.1.1/latest.yml',
+    githubReleases + '/tag/v3.41.31-beta.1', githubReleases + '/tag/v3.41.31/extra',
+    githubReleases + '/download/v3.41.31/latest.yml?token=secret',
+    githubReleases.replace('abdulmunthakimwork', 'someone') + '.atom',
+    githubReleases.replace('minecraft-launcher', 'other-repo') + '/latest',
+    githubReleases.replace('https:', 'http:') + '.atom', githubReleases.replace('github.com', 'github.com:444') + '.atom',
+    githubReleases.replace('github.com', 'user:secret@github.com') + '.atom',
+    githubReleases + '/download/v3.41.31/%6catest.yml', githubReleases + '/download/v3.41.31/%2f/latest.yml',
+    githubReleases + '/download/v3.41.31/%2e%2e/v3.41.31/latest.yml',
+    githubReleases + '/download/v3.41.31/../v3.41.31/latest.yml',
+    githubReleases + '/download/v3.41.31/latest.yml#fragment',
+    githubCdn.replace('1453904618', '1453904619') + '?sig=secret', githubCdn + '/extra?sig=secret',
+    githubCdn.replace('9ba8181c-b438-4b5b-91c2-7c89a08c5314', 'not-a-uuid'),
+    githubCdn.replace('release-assets.githubusercontent.com', 'objects.githubusercontent.com'),
+    githubCdn.replace('https:', 'http:'), githubCdn.replace('release-assets.githubusercontent.com', 'user:secret@release-assets.githubusercontent.com'),
+    'https://api.github.com/repos/abdulmunthakimwork/minecraft-launcher/releases/latest'];
+  for (const url of denied) assert.equal(isPermittedUpdateUrl(url, githubFeed), false, url);
+  assert.equal(isPermittedUpdateUrl(githubCdn, 'https://updates.example.test/launcher/'), false);
+});
+
+test('GitHub checks reject mismatched or missing tags before download including non-newer metadata', async t => {
+  const {controller, engine, info} = fixture(t);
+  await controller.configureFeed(githubFeed);
+  let downloads = 0;
+  const download = engine.downloadUpdate;
+  engine.downloadUpdate = async () => {downloads++; return download();};
+  for (const tag of [undefined, '3.41.31', 'v3.41.30', 'v3.41.31-beta.1']) {
+    info.tag = tag;
+    const state = await controller.checkForUpdates();
+    assert.equal(state.status, 'error', String(tag));
+    assert.equal(state.installAllowed, false);
+    assert.equal(downloads, 0);
+  }
+  for (const updateInfo of [{version: '3.41.30', tag: 'v3.41.29'},
+    {version: '3.41.30'}, {version: '3.41.30-beta.1', tag: 'v3.41.30-beta.1'}]) {
+    engine.checkForUpdates = async () => ({isUpdateAvailable: false, updateInfo});
+    assert.equal((await controller.checkForUpdates()).status, 'error', JSON.stringify(updateInfo));
+  }
+  engine.checkForUpdates = async () => ({isUpdateAvailable: false, updateInfo: {version: '3.41.30', tag: 'v3.41.30'}});
+  const state = await controller.checkForUpdates();
+  assert.equal(state.status, 'idle');
+  assert.ok(Number.isFinite(Date.parse(state.lastCheckedAt)));
+  await controller.configureFeed(githubFeed);
+  assert.equal(controller.getState().lastCheckedAt, null);
+});
+
+test('GitHub missing release metadata gives a safe actionable public error without signed URL leakage', async t => {
+  const {controller, engine} = fixture(t);
+  await controller.configureFeed(githubFeed);
+  for (const code of ['ERR_UPDATER_LATEST_VERSION_NOT_FOUND', 'ERR_UPDATER_NO_PUBLISHED_VERSIONS', 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND']) {
+    engine.checkForUpdates = async () => {throw Object.assign(new Error(githubCdn + '?sig=secret'), {code});};
+    const state = await controller.checkForUpdates();
+    assert.equal(state.status, 'error');
+    assert.match(state.error, /GitHub|latest.yml/);
+    assert.doesNotMatch(state.error, /sig=|secret|github-production-release-asset|configured update directory/);
+  }
+});
+
 test('missing update source is setup and performs no network check', async t => {
   const {controller, engine} = fixture(t);
   assert.equal(controller.getState().status, 'setup');
@@ -392,4 +537,58 @@ test('real NSIS updater stages without bundled publish configuration or invented
   assert.equal(cacheConfig.url, undefined);
   assert.ok(fs.existsSync(path.join(dir, 'cache', 'minecraft-launcher-desktop-updater', 'pending',
     'Minecraft-Launcher-Setup-3.41.31.exe')));
+});
+
+test('real public GitHub provider discovers stable metadata and stages the exact full setup through the repository CDN', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launcher-github-provider-test-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  fs.copyFileSync(path.join(__dirname, 'updater-cache.yml'), path.join(dir, 'app-update.yml'));
+  const {NsisUpdater} = require('electron-updater');
+  const engine = new NsisUpdater(null, {version: '3.41.30', name: 'Minecraft Launcher', isPackaged: true,
+    appUpdateConfigPath: path.join(dir, 'app-update.yml'), userDataPath: dir, baseCachePath: path.join(dir, 'cache'),
+    whenReady: async () => {}, onQuit() {throw new Error('Automatic install forbidden');},
+    quit() {throw new Error('No synthetic fixture may launch an installer');}});
+  engine.logger = null;
+  const bytes = Buffer.from('synthetic public GitHub setup');
+  const hash = crypto.createHash('sha512').update(bytes).digest('base64');
+  const filename = 'Minecraft-Launcher-Setup-3.41.31.exe';
+  const requestUrls = [], downloadUrls = [];
+  const {isPermittedUpdateUrl} = implementation();
+  engine.httpExecutor = {
+    async request(options) {
+      const url = `${options.protocol}//${options.hostname}${options.path}`;
+      requestUrls.push(url);
+      assert.equal(isPermittedUpdateUrl(url, githubFeed), true, url);
+      if (url === githubReleases + '.atom') return `<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>v3.41.31</title><link href="${githubReleases}/tag/v3.41.31"/><content>Stable release</content></entry></feed>`;
+      if (url === githubReleases + '/latest') return '{"tag_name":"v3.41.31"}';
+      assert.equal(url, githubReleases + '/download/v3.41.31/latest.yml');
+      return `version: 3.41.31\nfiles:\n  - url: ${filename}\n    size: ${bytes.length}\n    sha512: ${hash}\n`;
+    },
+    async download(url, destination) {
+      downloadUrls.push(url.href);
+      assert.equal(url.href, githubReleases + '/download/v3.41.31/' + filename);
+      assert.equal(isPermittedUpdateUrl(url.href, githubFeed), true);
+      assert.equal(isPermittedUpdateUrl(githubCdn + '?sig=fixture-signature', githubFeed), true);
+      fs.writeFileSync(destination, bytes);
+    },
+  };
+  const controller = new (implementation().UpdaterController)({updater: engine, userData: dir,
+    currentVersion: '3.41.30', isPackaged: true, defaultFeedUrl: githubFeed, isUpdateInstallSafe: async () => false});
+  t.after(() => controller.stop());
+  const provider = await engine.clientPromise;
+  assert.ok(provider, 'The default source did not construct a public GitHub provider');
+  assert.equal(provider.constructor.name, 'GitHubProvider');
+  assert.equal(provider.options.private, undefined);
+  assert.equal(provider.options.token, undefined);
+  const state = await controller.checkForUpdates();
+  assert.equal(state.status, 'ready', state.error);
+  assert.equal(state.installAllowed, false);
+  assert.equal(state.availableVersion, '3.41.31');
+  assert.deepEqual(requestUrls, [githubReleases + '.atom', githubReleases + '/latest', githubReleases + '/download/v3.41.31/latest.yml']);
+  assert.deepEqual(downloadUrls, [githubReleases + '/download/v3.41.31/' + filename]);
+  const metadata = {version: '3.41.31', tag: 'v3.41.31', files: [{url: filename, size: bytes.length, sha512: hash}]};
+  const resolved = provider.resolveFiles(metadata);
+  assert.equal(resolved[0].url.href, githubReleases + '/download/v3.41.31/' + filename);
+  assert.equal(metadata.files[0].url, filename, 'Provider must preserve metadata used by strict validation');
+  assert.equal(fs.readFileSync(controller.staged.filename).equals(bytes), true);
 });
