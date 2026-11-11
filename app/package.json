@@ -117,7 +117,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Minecraft Launcher",
-      "artifactName": "Minecraft-Launcher-Setup-${version}.${ext}"
+      "artifactName": "Minecraft-Launcher-Setup-${version}.${ext}",
+      "preCompressedFileExtensions": []
     },
     "portable": {
       "artifactName": "Minecraft-Launcher-${version}-Portable.${ext}"

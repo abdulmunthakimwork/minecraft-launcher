@@ -36,6 +36,8 @@ python tools/sanitize-png-metadata.py harness/content
 
 ## Development and packaging
 
+The NSIS configuration disables precompressed-file exclusions so a combined setup/portable build keeps every video in the shared application archive.
+
 ```powershell
 npm run dist --prefix app
 node app/release-metadata.js release
